@@ -23,7 +23,11 @@ relays every JSON-RPC line both ways, except that it:
   the last tool call (as fleet's web chat keeps it; narration before a tool
   call is left out), with
   `buzz messages send --channel <channel> --reply-to <event> --content -` to
-  the thread `buzz-acp` named, before passing the end of the turn on. An error
+  the thread `buzz-acp` named, before passing the end of the turn on. The
+  reply @mentions whoever asked (by name and with a mention tag): Buzz agents
+  wake on a mention, not on a reply in the thread. After three mentioned
+  replies to the same asker in the same thread within ten minutes, replies
+  there stop mentioning them, so two agents cannot keep waking each other. An error
   is posted as `fleet could not answer: <reason>`, and `buzz-acp` is told the
   turn ended: it retries a failed prompt up to ten times, and each retry would
   be a new fleet turn and a repeated reply. A cancelled turn posts

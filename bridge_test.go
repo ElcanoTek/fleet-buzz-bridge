@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -208,12 +209,12 @@ func TestPostsTheAnswerToTheBuzzThread(t *testing.T) {
 	if !ok {
 		t.Fatalf("nothing posted (stderr: %s)", h.stderr)
 	}
-	want := "messages\nsend\n--channel\n" + fixtureChannel + "\n--content\n-\n--reply-to\n" + fixtureEvent + "\n"
+	want := "messages\nsend\n--channel\n" + fixtureChannel + "\n--content\n-\n--reply-to\n" + fixtureEvent + "\n--mention\n" + strings.Repeat("a", 64) + "\n"
 	if args != want {
 		t.Errorf("buzz called with\n%s\nwant\n%s", args, want)
 	}
-	if body, _ := h.file("buzz-stdin"); body != "Hello world" {
-		t.Errorf("posted %q, want the streamed answer trimmed", body)
+	if body, _ := h.file("buzz-stdin"); body != "@alice Hello world" {
+		t.Errorf("posted %q, want the streamed answer trimmed, addressed to the asker", body)
 	}
 	if k, _ := h.file("buzz-has-key"); strings.TrimSpace(k) != "1" {
 		t.Error("the Buzz CLI did not get BUZZ_PRIVATE_KEY: it posts as the agent's identity")
@@ -253,7 +254,7 @@ func TestACancelledTurnPostsNothing(t *testing.T) {
 func TestAnErrorIsPostedSoTheAskerIsNotLeftWaiting(t *testing.T) {
 	h := startBridge(t, "error")
 	lines := h.promptBuzz(t, firstPrompt(t))
-	if body, _ := h.file("buzz-stdin"); body != "fleet could not answer: the fleet turn did not finish within 15s and was stopped" {
+	if body, _ := h.file("buzz-stdin"); body != "@alice fleet could not answer: the fleet turn did not finish within 15s and was stopped" {
 		t.Errorf("posted %q", body)
 	}
 	// buzz-acp retries a failed prompt, and each retry is a new fleet turn
@@ -308,7 +309,7 @@ func TestClientHangUpEndsTheAgentAndTheBridge(t *testing.T) {
 func TestPostsOnlyTheTextAfterTheLastToolCall(t *testing.T) {
 	h := startBridge(t, "narrate")
 	h.promptBuzz(t, firstPrompt(t))
-	if body, _ := h.file("buzz-stdin"); body != "17 × 23 = 391." {
+	if body, _ := h.file("buzz-stdin"); body != "@alice 17 × 23 = 391." {
 		t.Errorf("posted %q, want only the final answer", body)
 	}
 }
@@ -318,7 +319,7 @@ func TestPostsOnlyTheTextAfterTheLastToolCall(t *testing.T) {
 func TestPostsTheLatestTextWhenNothingFollowsTheLastToolCall(t *testing.T) {
 	h := startBridge(t, "tool-last")
 	h.promptBuzz(t, firstPrompt(t))
-	if body, _ := h.file("buzz-stdin"); body != "Here is what I found." {
+	if body, _ := h.file("buzz-stdin"); body != "@alice Here is what I found." {
 		t.Errorf("posted %q", body)
 	}
 }
@@ -328,7 +329,7 @@ func TestPostsTheLatestTextWhenNothingFollowsTheLastToolCall(t *testing.T) {
 func TestALateCancelPostsTheAnswerThatStands(t *testing.T) {
 	h := startBridge(t, "late-cancel")
 	h.promptBuzz(t, firstPrompt(t))
-	want := "albatross\n\nThe turn had already finished before the Stop reached fleet, so nothing was stopped: what it did (tool calls included) stands. See http://fleet.test/chat?c=1"
+	want := "@alice albatross\n\nThe turn had already finished before the Stop reached fleet, so nothing was stopped: what it did (tool calls included) stands. See http://fleet.test/chat?c=1"
 	if body, _ := h.file("buzz-stdin"); body != want {
 		t.Errorf("posted %q", body)
 	}
@@ -339,7 +340,7 @@ func TestALateCancelPostsTheAnswerThatStands(t *testing.T) {
 func TestAnUnconfirmedStopPostsFleetsNote(t *testing.T) {
 	h := startBridge(t, "unconfirmed-stop")
 	h.promptBuzz(t, firstPrompt(t))
-	want := "fleet could not confirm this turn stopped (timeout). It may still be running: stop it at http://fleet.test/chat?c=1"
+	want := "@alice fleet could not confirm this turn stopped (timeout). It may still be running: stop it at http://fleet.test/chat?c=1"
 	if body, _ := h.file("buzz-stdin"); body != want {
 		t.Errorf("posted %q", body)
 	}
@@ -365,10 +366,64 @@ func TestARefusedSessionTellsTheAskerWhy(t *testing.T) {
 	if r, _ := lines[len(lines)-1]["result"].(map[string]any); r["stopReason"] != "end_turn" {
 		t.Errorf("prompt answered %v, want end_turn", lines[len(lines)-1])
 	}
-	if body, _ := h.file("buzz-stdin"); body != "fleet could not answer: server rejected the request (403): nobody@example.com is not a fleet user" {
+	if body, _ := h.file("buzz-stdin"); body != "@alice fleet could not answer: server rejected the request (403): nobody@example.com is not a fleet user" {
 		t.Errorf("posted %q", body)
 	}
 	if _, ok := h.file("agent-prompt"); ok {
 		t.Error("the prompt reached the agent that refused the session")
+	}
+}
+
+func addressTurn(events ...buzzEvent) buzzTurn {
+	return buzzTurn{channelID: fixtureChannel, channelName: "general", replyTo: fixtureEvent, events: events}
+}
+
+func newTestBridge(now *time.Time) *bridge {
+	return &bridge{log: log.New(io.Discard, "", 0), mentioned: map[string][]time.Time{}, now: func() time.Time { return *now }}
+}
+
+// Each distinct asker is mentioned once, by name and by key.
+func TestRepliesMentionEachAsker(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	b := newTestBridge(&now)
+	alice := buzzEvent{from: "alice", pubkey: strings.Repeat("a", 64), content: "x"}
+	fizz := buzzEvent{from: "Fizz", pubkey: strings.Repeat("f", 64), content: "y"}
+	text, keys := b.address(addressTurn(alice, fizz, alice), "the answer")
+	if text != "@alice @Fizz the answer" {
+		t.Errorf("text = %q", text)
+	}
+	if strings.Join(keys, ",") != alice.pubkey+","+fizz.pubkey {
+		t.Errorf("mentions = %v", keys)
+	}
+	// A sender whose key the prompt did not carry is not mentioned.
+	if text, keys := b.address(addressTurn(buzzEvent{from: "someone", content: "z"}), "a"); text != "a" || keys != nil {
+		t.Errorf("text = %q, mentions = %v", text, keys)
+	}
+}
+
+// Two agents mentioning each other could keep waking each other: after
+// maxMentions mentioned replies to one asker in one thread within the window,
+// replies there stop mentioning them, until the window has passed.
+func TestMentionsAreCappedPerAskerAndThread(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	b := newTestBridge(&now)
+	fizz := buzzEvent{from: "Fizz", pubkey: strings.Repeat("f", 64), content: "y"}
+	for i := 0; i < maxMentions; i++ {
+		if _, keys := b.address(addressTurn(fizz), "r"); len(keys) != 1 {
+			t.Fatalf("reply %d did not mention the asker", i+1)
+		}
+		now = now.Add(time.Minute)
+	}
+	if text, keys := b.address(addressTurn(fizz), "r"); text != "r" || keys != nil {
+		t.Errorf("reply %d mentioned again: %q %v", maxMentions+1, text, keys)
+	}
+	other := addressTurn(fizz)
+	other.replyTo = strings.Repeat("e", 64)
+	if _, keys := b.address(other, "r"); len(keys) != 1 {
+		t.Error("the cap leaked into another thread")
+	}
+	now = now.Add(mentionWindow)
+	if _, keys := b.address(addressTurn(fizz), "r"); len(keys) != 1 {
+		t.Error("still capped after the window passed")
 	}
 }

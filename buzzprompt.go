@@ -21,7 +21,8 @@ type buzzTurn struct {
 }
 
 type buzzEvent struct {
-	from    string
+	from    string // display name
+	pubkey  string // hex, for mentioning the sender in the reply
 	content string
 }
 
@@ -37,6 +38,7 @@ var (
 	eventBlock   = regexp.MustCompile(`(?s)<buzz-event[^>]*>\n(.*?)\n</buzz-event>`)
 	eventIDLine  = regexp.MustCompile(`(?m)^Event ID: ([0-9a-f]{64})$`)
 	fromLine     = regexp.MustCompile(`(?m)^From: (.*)$`)
+	fromHex      = regexp.MustCompile(`hex: ([0-9a-f]{64})\)`)
 	// Content runs from its label to the next field buzz-acp writes after it
 	// (format_event_block in buzz-acp's queue.rs), so a multi-line message
 	// stays whole.
@@ -81,6 +83,9 @@ func parseBuzzTurn(text string) (buzzTurn, bool) {
 		ev := buzzEvent{from: "someone"}
 		if m := fromLine.FindStringSubmatch(block[1]); m != nil {
 			ev.from = displayName(m[1])
+			if h := fromHex.FindStringSubmatch(m[1]); h != nil {
+				ev.pubkey = h[1]
+			}
 		}
 		if m := contentField.FindStringSubmatch("\n" + block[1]); m != nil {
 			ev.content = strings.TrimSpace(m[1])

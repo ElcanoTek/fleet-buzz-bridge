@@ -96,6 +96,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, env []string)
 		pending:    map[string]*turn{},
 		sessionNew: map[string]bool{},
 		refused:    map[string]string{},
+		mentioned:  map[string][]time.Time{},
+		now:        time.Now,
 	}
 	go func() {
 		b.clientToAgent(stdin, toAgent)
@@ -171,7 +173,8 @@ func (t *turn) answer() string {
 
 type bridge struct {
 	log  *log.Logger
-	post func(ctx context.Context, t buzzTurn, text string) error
+	post func(ctx context.Context, t buzzTurn, text string, mentions []string) error
+	now  func() time.Time
 
 	outMu  sync.Mutex // the bridge answers some requests itself, besides relaying
 	client io.Writer  // buzz-acp
@@ -181,6 +184,53 @@ type bridge struct {
 	sessionNew map[string]bool   // session/new request ids awaiting the agent's answer
 	refused    map[string]string // placeholder session id → why the agent refused it
 	nRefused   int
+	mentioned  map[string][]time.Time // thread|asker → when the bridge last mentioned them
+}
+
+// A reply mentions whoever asked: Buzz agents (and buzz-acp) wake on a
+// mention, not on a reply in the thread, so without one an agent that asked
+// fleet something never sees the answer (seen live). Two agents that mention
+// each other could keep waking each other, so after maxMentions mentioned
+// replies to the same asker in the same thread within mentionWindow, replies
+// there still go out but no longer mention them.
+const (
+	maxMentions   = 3
+	mentionWindow = 10 * time.Minute
+)
+
+// address puts an @mention of each distinct asker in front of text and
+// returns their pubkeys, for the post's mention tags.
+func (b *bridge) address(t buzzTurn, text string) (string, []string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	now := b.now()
+	var names, keys []string
+	seen := map[string]bool{}
+	for _, ev := range t.events {
+		if ev.pubkey == "" || seen[ev.pubkey] {
+			continue
+		}
+		seen[ev.pubkey] = true
+		key := t.replyTo + "|" + ev.pubkey
+		var recent []time.Time
+		for _, at := range b.mentioned[key] {
+			if now.Sub(at) < mentionWindow {
+				recent = append(recent, at)
+			}
+		}
+		if len(recent) >= maxMentions {
+			b.mentioned[key] = recent
+			b.log.Printf("not mentioning %s again in this thread: %d mentioned replies in %s", ev.from, len(recent), mentionWindow)
+			continue
+		}
+		b.mentioned[key] = append(recent, now)
+		names = append(names, "@"+ev.from)
+		keys = append(keys, ev.pubkey)
+	}
+	if len(names) == 0 {
+		return text, nil
+	}
+	return strings.Join(names, " ") + " " + text, keys
 }
 
 func (b *bridge) toClient(line []byte) {
@@ -321,7 +371,8 @@ func (b *bridge) handleRefusedSession(line []byte) bool {
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
-		if err := b.post(ctx, bt, "fleet could not answer: "+reason); err != nil {
+		text, mentions := b.address(bt, "fleet could not answer: "+reason)
+		if err := b.post(ctx, bt, text, mentions); err != nil {
 			b.log.Printf("posting the agent's refusal to #%s failed: %v", bt.channelName, err)
 		}
 		b.toClient([]byte(`{"jsonrpc":"2.0","id":` + string(msg.ID) + `,"result":{"stopReason":"end_turn"}}` + "\n"))
@@ -449,7 +500,8 @@ func (b *bridge) observe(line []byte) []byte {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	if err := b.post(ctx, t.buzz, text); err != nil {
+	text, mentions := b.address(t.buzz, text)
+	if err := b.post(ctx, t.buzz, text, mentions); err != nil {
 		b.log.Printf("posting the answer to #%s failed: %v", t.buzz.channelName, err)
 	}
 	if out != nil {
@@ -469,17 +521,20 @@ func stopReason(result json.RawMessage) string {
 // cliPoster posts with the Buzz CLI as the agent's own identity: the CLI reads
 // BUZZ_PRIVATE_KEY and BUZZ_RELAY_URL from env, which buzz-acp provides. The
 // CLI is $FLEET_BUZZ_CLI, else `buzz` on PATH.
-func cliPoster(env []string, logger *log.Logger) func(context.Context, buzzTurn, string) error {
+func cliPoster(env []string, logger *log.Logger) func(context.Context, buzzTurn, string, []string) error {
 	cli := "buzz"
 	for _, kv := range env {
 		if v, ok := strings.CutPrefix(kv, "FLEET_BUZZ_CLI="); ok && v != "" {
 			cli = v
 		}
 	}
-	return func(ctx context.Context, t buzzTurn, text string) error {
+	return func(ctx context.Context, t buzzTurn, text string, mentions []string) error {
 		args := []string{"messages", "send", "--channel", t.channelID, "--content", "-"}
 		if t.replyTo != "" {
 			args = append(args, "--reply-to", t.replyTo)
+		}
+		for _, k := range mentions {
+			args = append(args, "--mention", k)
 		}
 		cmd := exec.CommandContext(ctx, cli, args...)
 		cmd.Env = env
