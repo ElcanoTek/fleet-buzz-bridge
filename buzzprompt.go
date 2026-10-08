@@ -108,14 +108,21 @@ func parseBuzzTurn(text string) (buzzTurn, bool) {
 	return t, true
 }
 
-// displayName is the From field's name, without the npub and hex buzz-acp
-// appends: "kristian (npub: …, hex: …)" is "kristian".
+// displayName is the From field's name, without the keys buzz-acp appends:
+// "kristian (npub: …, hex: …)" is "kristian", and a sender with no profile
+// name, "npub1… (hex: …)", is its npub.
 func displayName(from string) string {
-	if i := strings.Index(from, " (npub: "); i > 0 {
-		return strings.TrimSpace(from[:i])
+	for _, sep := range []string{" (npub: ", " (hex: "} {
+		if i := strings.Index(from, sep); i > 0 {
+			from = from[:i]
+		}
 	}
 	return strings.TrimSpace(from)
 }
+
+// buzzMedia matches a file attached in Buzz, which buzz-acp passes as a
+// Markdown link to the relay's /media/ path.
+var buzzMedia = regexp.MustCompile(`\]\(https?://[^)\s]+/media/[^)\s]+\)`)
 
 var sectionTitles = map[string]string{
 	"thread-context":                             "Earlier in this thread",
@@ -141,6 +148,14 @@ func (t buzzTurn) prompt() string {
 	}
 	for _, ev := range t.events {
 		b.WriteString(ev.from + ": " + ev.content + "\n\n")
+	}
+	for _, ev := range t.events {
+		if buzzMedia.MatchString(ev.content) {
+			// Seen live: the relay answers 401 without a Buzz login, so a
+			// fetch fails and the model guessed ("Unknown").
+			b.WriteString("Files attached in Buzz (the /media/ links above) need a Buzz login, so they cannot be opened from here: if the message depends on one, say so.\n\n")
+			break
+		}
 	}
 	b.WriteString("Your reply is posted to that Buzz thread as you write it, so answer with the message itself. There is no Buzz CLI here, and nothing else is needed to send it.")
 	return b.String()

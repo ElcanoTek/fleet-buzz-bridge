@@ -102,3 +102,32 @@ func TestLeavesOtherPromptsAlone(t *testing.T) {
 		}
 	}
 }
+
+// A sender with no profile name is shown by its npub alone, and a file
+// attached in Buzz comes with a note that it cannot be opened from fleet.
+func TestUnnamedSendersAndAttachedFiles(t *testing.T) {
+	text := "<context>\nChannel: general (#" + fixtureChannel + ")\n</context>\n<buzz-event type=\"@mention\">\nEvent ID: " + fixtureEvent +
+		"\nFrom: npub1tester (hex: " + strings.Repeat("d", 64) + ")\nContent: @fleet What colour is this?\n![image](https://relay.example/media/abc.png)\nTags: []\n</buzz-event>"
+	bt, ok := parseBuzzTurn(text)
+	if !ok {
+		t.Fatal("not recognised")
+	}
+	if bt.events[0].from != "npub1tester" {
+		t.Errorf("from = %q", bt.events[0].from)
+	}
+	p := bt.prompt()
+	if !strings.Contains(p, "need a Buzz login, so they cannot be opened from here") {
+		t.Errorf("no note about the attached file:\n%s", p)
+	}
+	if strings.Contains(firstPromptTurn(t).prompt(), "Buzz login") {
+		t.Error("the note appears without an attachment")
+	}
+}
+
+func firstPromptTurn(t *testing.T) buzzTurn {
+	bt, ok := parseBuzzTurn(firstPrompt(t))
+	if !ok {
+		t.Fatal("fixture not recognised")
+	}
+	return bt
+}
