@@ -243,6 +243,22 @@ func TestPostsTheAnswerToTheBuzzThread(t *testing.T) {
 	}
 }
 
+// End to end, the batch seen live: the answer threads under the last message
+// and mentions both askers, instead of landing in the channel unaddressed.
+func TestABatchedTurnIsPostedToEveryAsker(t *testing.T) {
+	h := startBridge(t, "answer")
+	h.promptBuzz(t, "<context>\nScope: channel\nChannel: general (#"+fixtureChannel+")\n</context>\n\n<buzz-events count=\"2\">\n"+
+		listed(1, kristianMsg, "kristian", kristianHex, "@Fizz ask @fleet")+"\n\n"+listed(2, fizzMsg, "Fizz", fizzHex, "@fleet what's new?")+"\n</buzz-events>")
+	args, _ := h.file("buzz-args")
+	want := "messages\nsend\n--channel\n" + fixtureChannel + "\n--content\n-\n--reply-to\n" + fizzMsg + "\n--mention\n" + kristianHex + "\n--mention\n" + fizzHex + "\n"
+	if args != want {
+		t.Errorf("buzz called with\n%s\nwant\n%s", args, want)
+	}
+	if body, _ := h.file("buzz-stdin"); body != "@kristian @Fizz Hello world" {
+		t.Errorf("posted %q", body)
+	}
+}
+
 func TestACancelledTurnPostsNothing(t *testing.T) {
 	h := startBridge(t, "cancel")
 	h.promptBuzz(t, firstPrompt(t))

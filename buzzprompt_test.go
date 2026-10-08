@@ -72,22 +72,85 @@ func TestKeepsEarlierContextAndMultiLineMessages(t *testing.T) {
 	}
 }
 
-func TestBatchedEventsAndAFallbackReplyTarget(t *testing.T) {
-	ev := func(id, from, content string) string {
-		return "<buzz-event type=\"@mention\">\nEvent ID: " + id + "\nFrom: " + from + " (npub: npub1x, hex: x)\nContent: " + content + "\nTags: []\n</buzz-event>\n"
-	}
-	// No --reply-to in <context>: thread under the last event.
-	text := "<context>\nChannel: general (#" + fixtureChannel + ")\n</context>\n<buzz-events>\n" +
-		ev(strings.Repeat("1", 64), "alice", "first") + ev(strings.Repeat("2", 64), "bob", "second") + "</buzz-events>"
+// listed is an event as buzz-acp lists it in a section (format_prompt and
+// format_event_block in its queue.rs at 70d2ca7): under an "--- Event N ---"
+// heading, with no <buzz-event> around it.
+func listed(n int, id, from, hex, content string) string {
+	return "--- Event " + string(rune('0'+n)) + " (@mention) ---\nEvent ID: " + id + "\nChannel: general (#" + fixtureChannel + ")\nKind: 9\n" +
+		"From: " + from + " (npub: npub1" + hex[:6] + ", hex: " + hex + ")\nTime: 2026-10-08T14:42:19+00:00\n" +
+		"Content: " + content + "\nTags: [[\"p\",\"" + strings.Repeat("0", 64) + "\"]]\nParsed: mentions=[fleet (" + strings.Repeat("0", 64) + ")]"
+}
+
+var (
+	kristianHex = strings.Repeat("8", 64)
+	fizzHex     = strings.Repeat("f", 64)
+	kristianMsg = strings.Repeat("1", 64)
+	fizzMsg     = strings.Repeat("2", 64)
+)
+
+// Seen live: a person's mention and an agent's, eight seconds apart, reached
+// a just-started agent as one batch, and buzz-acp gave an agent↔agent turn
+// at the top level no reply target. The reply must still go under the last
+// message and mention both askers.
+func TestABatchIsAnsweredUnderItsLastMessage(t *testing.T) {
+	text := "<context>\nScope: channel\nChannel: general (#" + fixtureChannel + ")\n</context>\n\n" +
+		"<buzz-events count=\"2\">\n" +
+		listed(1, kristianMsg, "kristian", kristianHex, "@Fizz ask @fleet with the last Anthropic release") + "\n\n" +
+		listed(2, fizzMsg, "Fizz", fizzHex, "@fleet what's the latest Anthropic release?") +
+		"\n</buzz-events>"
 	bt, ok := parseBuzzTurn(text)
 	if !ok || len(bt.events) != 2 {
 		t.Fatalf("ok=%v events=%+v", ok, bt.events)
 	}
-	if bt.replyTo != strings.Repeat("2", 64) {
-		t.Errorf("reply-to = %s, want the last event", bt.replyTo)
+	if bt.replyTo != fizzMsg {
+		t.Errorf("reply-to = %s, want the last message", bt.replyTo)
 	}
-	if p := bt.prompt(); !strings.Contains(p, "Messages for you") || !strings.Contains(p, "alice: first\n\nbob: second") {
+	if bt.events[0].pubkey != kristianHex || bt.events[1].pubkey != fizzHex {
+		t.Errorf("senders = %+v", bt.events)
+	}
+	p := bt.prompt()
+	if !strings.Contains(p, "Messages for you in the Buzz channel #general:\n\nkristian: @Fizz ask @fleet with the last Anthropic release\n\nFizz: @fleet what's the latest Anthropic release?") {
 		t.Errorf("prompt:\n%s", p)
+	}
+	for _, gone := range []string{"--- Event", "Tags:", "npub", "Parsed:"} {
+		if strings.Contains(p, gone) {
+			t.Errorf("prompt still carries %q:\n%s", gone, p)
+		}
+	}
+}
+
+// A message that arrives mid-turn makes buzz-acp stop the turn and send a
+// merged one: the request the agent was working on, then the new message.
+// The reply answers both askers, since the stopped turn posted nothing.
+func TestAMergedTurnKeepsWhatTheAgentWasWorkingOn(t *testing.T) {
+	for _, c := range []struct{ earlierTag, newTag, earlierTitle, head, note string }{
+		{"what-you-were-working-on", "new-message-arrived-while-you-were-working",
+			"What you were working on:", "A message for you in the Buzz channel #general, sent while you were working:", "Carry on with that work"},
+		{"previous-request-interrupted-before-completion", "new-request-supersedes-previous",
+			"The request you were working on, which was stopped:", "A message for you in the Buzz channel #general, which replaces it:", "Answer the new request."},
+	} {
+		text := "<context>\nScope: thread\nChannel: general (#" + fixtureChannel + ")\nIMPORTANT: reply with `--reply-to " + fixtureEvent + "`\n</context>\n\n" +
+			"<" + c.earlierTag + ">\n" + listed(1, kristianMsg, "kristian", kristianHex, "find the latest release") + "\n</" + c.earlierTag + ">\n\n" +
+			"<" + c.newTag + ">\n" + listed(1, fizzMsg, "Fizz", fizzHex, "and its price") + "\n</" + c.newTag + ">\n\n" +
+			"Note: buzz-acp's closing note."
+		bt, ok := parseBuzzTurn(text)
+		if !ok {
+			t.Fatalf("%s: not recognised", c.newTag)
+		}
+		if bt.replyTo != fixtureEvent {
+			t.Errorf("%s: reply-to = %s, want the one <context> names", c.newTag, bt.replyTo)
+		}
+		if len(bt.events) != 1 || bt.events[0].from != "Fizz" || len(bt.earlier) != 1 || bt.earlier[0].from != "kristian" {
+			t.Errorf("%s: events = %+v, earlier = %+v", c.newTag, bt.events, bt.earlier)
+		}
+		p := bt.prompt()
+		want := c.earlierTitle + "\n\nkristian: find the latest release\n\n" + c.head + "\n\nFizz: and its price\n\n" + c.note
+		if !strings.Contains(p, want) || strings.Contains(p, "--- Event") || strings.Contains(p, "Tags:") {
+			t.Errorf("%s: prompt:\n%s\nwant it to contain:\n%s", c.newTag, p, want)
+		}
+		if a := bt.askers(); len(a) != 2 || a[0].pubkey != kristianHex || a[1].pubkey != fizzHex {
+			t.Errorf("%s: askers = %+v", c.newTag, a)
+		}
 	}
 }
 

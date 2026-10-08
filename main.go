@@ -206,7 +206,7 @@ func (b *bridge) address(t buzzTurn, text string) (string, []string) {
 	now := b.now()
 	var names, keys []string
 	seen := map[string]bool{}
-	for _, ev := range t.events {
+	for _, ev := range t.askers() {
 		if ev.pubkey == "" || seen[ev.pubkey] {
 			continue
 		}

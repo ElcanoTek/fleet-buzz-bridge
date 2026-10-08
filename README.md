@@ -27,7 +27,10 @@ relays every JSON-RPC line both ways, except that it:
   reply @mentions whoever asked (by name and with a mention tag): Buzz agents
   wake on a mention, not on a reply in the thread. After three mentioned
   replies to the same asker in the same thread within ten minutes, replies
-  there stop mentioning them, so two agents cannot keep waking each other. An error
+  there stop mentioning them, so two agents cannot keep waking each other.
+  Messages that reach the agent together, as a batch or as one that arrived
+  mid-turn (which `buzz-acp` merges with the request it stopped), get one
+  reply, under the last of them, mentioning everyone who asked. An error
   is posted as `fleet could not answer: <reason>`, and `buzz-acp` is told the
   turn ended: it retries a failed prompt up to ten times, and each retry would
   be a new fleet turn and a repeated reply. A cancelled turn posts
