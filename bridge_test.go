@@ -54,6 +54,12 @@ func fakeAgent() {
 				"update":    map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"type": "text", "text": text}},
 			}})
 		}
+		toolCall := func() {
+			_ = out.Encode(map[string]any{"jsonrpc": "2.0", "method": "session/update", "params": map[string]any{
+				"sessionId": req.Params.SessionID,
+				"update":    map[string]any{"sessionUpdate": "tool_call", "toolCallId": "t1", "title": "run_python", "status": "in_progress"},
+			}})
+		}
 		switch req.Method {
 		case "initialize":
 			reply(map[string]any{"result": map[string]any{"protocolVersion": 1}})
@@ -76,6 +82,15 @@ func fakeAgent() {
 			case "error":
 				reply(map[string]any{"error": map[string]any{"code": -32603, "message": "the fleet turn did not finish within 15s and was stopped"}})
 			case "silent":
+				reply(map[string]any{"result": map[string]any{"stopReason": "end_turn"}})
+			case "narrate":
+				chunk("I'll compute 17 × 23 now.")
+				toolCall()
+				chunk("17 × 23 = 391.")
+				reply(map[string]any{"result": map[string]any{"stopReason": "end_turn"}})
+			case "tool-last":
+				chunk("Here is what I found.")
+				toolCall()
 				reply(map[string]any{"result": map[string]any{"stopReason": "end_turn"}})
 			default:
 				chunk("Hello")
@@ -264,5 +279,26 @@ func TestClientHangUpEndsTheAgentAndTheBridge(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("the bridge did not exit when its client hung up")
+	}
+}
+
+// fleet keeps only the text after the last tool call as a turn's answer, and
+// so does the bridge: narration before a tool call is not posted, nor run
+// together with the answer (seen live as "…now.17 × 23 = 391.").
+func TestPostsOnlyTheTextAfterTheLastToolCall(t *testing.T) {
+	h := startBridge(t, "narrate")
+	h.promptBuzz(t, firstPrompt(t))
+	if body, _ := h.file("buzz-stdin"); body != "17 × 23 = 391." {
+		t.Errorf("posted %q, want only the final answer", body)
+	}
+}
+
+// With nothing written after the last tool call, the latest text written is
+// the answer.
+func TestPostsTheLatestTextWhenNothingFollowsTheLastToolCall(t *testing.T) {
+	h := startBridge(t, "tool-last")
+	h.promptBuzz(t, firstPrompt(t))
+	if body, _ := h.file("buzz-stdin"); body != "Here is what I found." {
+		t.Errorf("posted %q", body)
 	}
 }

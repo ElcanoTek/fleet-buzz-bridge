@@ -19,7 +19,9 @@ relays every JSON-RPC line both ways, except that it:
   instructions (`<base>`, about 20 KB on a session's first prompt) are left
   out: they tell the agent to use a CLI it does not have.
 - **posts the answer.** It collects the `agent_message_chunk` text of that
-  prompt and, when the turn ends, posts it with
+  prompt and, when the turn ends, posts fleet's answer, the text written after
+  the last tool call (as fleet's web chat keeps it; narration before a tool
+  call is left out), with
   `buzz messages send --channel <channel> --reply-to <event> --content -` to
   the thread `buzz-acp` named, before passing the end of the turn on. An error
   is posted as `fleet could not answer: <reason>`; a cancelled turn, or one

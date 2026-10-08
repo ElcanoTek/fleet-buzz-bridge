@@ -129,11 +129,25 @@ func withoutVars(env, names []string) []string {
 }
 
 // A turn is one Buzz session/prompt in flight: where its answer goes, and
-// the answer so far.
+// the text the agent has written so far, split at its tool calls.
 type turn struct {
 	session string
 	buzz    buzzTurn
-	answer  strings.Builder
+	steps   []*strings.Builder // text between tool calls; the last is the latest
+}
+
+// answer is what fleet itself keeps as the turn's answer: the text written
+// after the last tool call, or, when nothing was written after it, the latest
+// text written before it. Text a model writes before a tool call ("I'll check
+// that now") is narration: fleet's web chat drops it when the turn ends, so
+// Buzz does not get it either, nor run together with the answer.
+func (t *turn) answer() string {
+	for i := len(t.steps) - 1; i >= 0; i-- {
+		if s := strings.TrimSpace(t.steps[i].String()); s != "" {
+			return s
+		}
+	}
+	return ""
 }
 
 type bridge struct {
@@ -262,13 +276,22 @@ func (b *bridge) observe(line []byte) {
 				} `json:"content"`
 			} `json:"update"`
 		}
-		if json.Unmarshal(msg.Params, &p) != nil || p.Update.Kind != "agent_message_chunk" {
+		if json.Unmarshal(msg.Params, &p) != nil {
 			return
 		}
 		b.mu.Lock()
 		for _, t := range b.pending {
-			if t.session == p.SessionID {
-				t.answer.WriteString(p.Update.Content.Text)
+			if t.session != p.SessionID {
+				continue
+			}
+			switch p.Update.Kind {
+			case "agent_message_chunk":
+				if len(t.steps) == 0 {
+					t.steps = append(t.steps, &strings.Builder{})
+				}
+				t.steps[len(t.steps)-1].WriteString(p.Update.Content.Text)
+			case "tool_call":
+				t.steps = append(t.steps, &strings.Builder{})
 			}
 		}
 		b.mu.Unlock()
@@ -284,7 +307,7 @@ func (b *bridge) observe(line []byte) {
 	if t == nil {
 		return
 	}
-	text := strings.TrimSpace(t.answer.String())
+	text := t.answer()
 	switch {
 	case msg.Error != nil:
 		// buzz-acp leaves an asker waiting otherwise: say why there is no answer.
