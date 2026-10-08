@@ -24,8 +24,10 @@ relays every JSON-RPC line both ways, except that it:
   call is left out), with
   `buzz messages send --channel <channel> --reply-to <event> --content -` to
   the thread `buzz-acp` named, before passing the end of the turn on. An error
-  is posted as `fleet could not answer: <reason>`; a cancelled turn, or one
-  with no answer text, posts nothing.
+  is posted as `fleet could not answer: <reason>`. A cancelled turn posts
+  nothing, unless fleet says the Stop came after the turn had finished (its
+  answer and that note are posted) or that it could not confirm the Stop (that
+  note is posted); a turn with no answer text posts nothing.
 - **keeps Buzz's credentials from fleet.** `BUZZ_PRIVATE_KEY` and the other
   Buzz credential variables are removed from `fleet acp`'s environment; only
   the bridge posts.

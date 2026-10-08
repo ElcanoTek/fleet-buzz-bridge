@@ -88,6 +88,15 @@ func fakeAgent() {
 				toolCall()
 				chunk("17 × 23 = 391.")
 				reply(map[string]any{"result": map[string]any{"stopReason": "end_turn"}})
+			case "late-cancel":
+				chunk("albatross")
+				chunk("\n\nThe turn had already finished before the Stop reached fleet, so nothing was stopped: what it did (tool calls included) stands. See http://fleet.test/chat?c=1")
+				reply(map[string]any{"result": map[string]any{"stopReason": "cancelled"}})
+			case "unconfirmed-stop":
+				chunk("I'll run that now:")
+				toolCall()
+				chunk("\n\nfleet could not confirm this turn stopped (timeout). It may still be running: stop it at http://fleet.test/chat?c=1")
+				reply(map[string]any{"result": map[string]any{"stopReason": "cancelled"}})
 			case "tool-last":
 				chunk("Here is what I found.")
 				toolCall()
@@ -299,6 +308,28 @@ func TestPostsTheLatestTextWhenNothingFollowsTheLastToolCall(t *testing.T) {
 	h := startBridge(t, "tool-last")
 	h.promptBuzz(t, firstPrompt(t))
 	if body, _ := h.file("buzz-stdin"); body != "Here is what I found." {
+		t.Errorf("posted %q", body)
+	}
+}
+
+// A Stop that reached fleet after the turn had finished leaves the answer
+// standing: the asker gets it, with fleet's note, rather than nothing.
+func TestALateCancelPostsTheAnswerThatStands(t *testing.T) {
+	h := startBridge(t, "late-cancel")
+	h.promptBuzz(t, firstPrompt(t))
+	want := "albatross\n\nThe turn had already finished before the Stop reached fleet, so nothing was stopped: what it did (tool calls included) stands. See http://fleet.test/chat?c=1"
+	if body, _ := h.file("buzz-stdin"); body != want {
+		t.Errorf("posted %q", body)
+	}
+}
+
+// A Stop fleet could not confirm may leave the turn running: the asker gets
+// fleet's note and where to stop it, not the narration before it.
+func TestAnUnconfirmedStopPostsFleetsNote(t *testing.T) {
+	h := startBridge(t, "unconfirmed-stop")
+	h.promptBuzz(t, firstPrompt(t))
+	want := "fleet could not confirm this turn stopped (timeout). It may still be running: stop it at http://fleet.test/chat?c=1"
+	if body, _ := h.file("buzz-stdin"); body != want {
 		t.Errorf("posted %q", body)
 	}
 }

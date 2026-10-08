@@ -136,6 +136,22 @@ type turn struct {
 	steps   []*strings.Builder // text between tool calls; the last is the latest
 }
 
+// fleet acp's notes on a cancelled prompt (internal/acp/agent.go): the Stop
+// reached fleet after the turn had finished, or fleet did not confirm it.
+const (
+	alreadyFinishedNote = "The turn had already finished before the Stop reached fleet"
+	notConfirmedNote    = "fleet could not confirm this turn stopped"
+)
+
+// allText is everything the agent wrote in the turn, in order.
+func (t *turn) allText() string {
+	var b strings.Builder
+	for _, s := range t.steps {
+		b.WriteString(s.String())
+	}
+	return b.String()
+}
+
 // answer is what fleet itself keeps as the turn's answer: the text written
 // after the last tool call, or, when nothing was written after it, the latest
 // text written before it. Text a model writes before a tool call ("I'll check
@@ -313,7 +329,19 @@ func (b *bridge) observe(line []byte) {
 		// buzz-acp leaves an asker waiting otherwise: say why there is no answer.
 		text = "fleet could not answer: " + msg.Error.Message
 	case stopReason(msg.Result) == "cancelled":
-		return // stopped on purpose; what streamed before is not an answer
+		// Stopped on purpose: what streamed before is not an answer, unless
+		// fleet's note says the Stop came too late or was not confirmed.
+		// Then the asker needs to know, as they would in an editor.
+		full := t.allText()
+		switch {
+		case strings.Contains(full, alreadyFinishedNote):
+			// The turn finished before the Stop: its answer stands, and
+			// fleet's note (in the same text) says so.
+		case strings.Contains(full, notConfirmedNote):
+			text = strings.TrimSpace(full[strings.Index(full, notConfirmedNote):])
+		default:
+			return
+		}
 	case text == "":
 		b.log.Print("the turn ended with no answer text; nothing posted")
 		return
