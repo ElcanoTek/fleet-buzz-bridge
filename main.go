@@ -267,7 +267,9 @@ func (b *bridge) rewritePrompt(line []byte) ([]byte, bool) {
 
 func (b *bridge) agentToClient(from io.Reader, to io.Writer) {
 	readLines(from, func(line []byte) {
-		b.observe(line)
+		if out := b.observe(line); out != nil {
+			line = out
+		}
 		if _, err := to.Write(line); err != nil {
 			b.log.Printf("write to client: %v", err)
 		}
@@ -276,11 +278,12 @@ func (b *bridge) agentToClient(from io.Reader, to io.Writer) {
 
 // observe collects a turn's answer and, when its response arrives, posts it.
 // It runs before the response is passed on, so the reply is in Buzz by the
-// time buzz-acp sees the turn end.
-func (b *bridge) observe(line []byte) {
+// time buzz-acp sees the turn end. It returns a replacement for line, or nil
+// to pass it on as is.
+func (b *bridge) observe(line []byte) []byte {
 	var msg message
 	if json.Unmarshal(line, &msg) != nil {
-		return
+		return nil
 	}
 	if msg.Method == "session/update" {
 		var p struct {
@@ -293,7 +296,7 @@ func (b *bridge) observe(line []byte) {
 			} `json:"update"`
 		}
 		if json.Unmarshal(msg.Params, &p) != nil {
-			return
+			return nil
 		}
 		b.mu.Lock()
 		for _, t := range b.pending {
@@ -311,23 +314,29 @@ func (b *bridge) observe(line []byte) {
 			}
 		}
 		b.mu.Unlock()
-		return
+		return nil
 	}
 	if msg.Method != "" || len(msg.ID) == 0 {
-		return
+		return nil
 	}
 	b.mu.Lock()
 	t := b.pending[string(msg.ID)]
 	delete(b.pending, string(msg.ID))
 	b.mu.Unlock()
 	if t == nil {
-		return
+		return nil
 	}
 	text := t.answer()
+	var out []byte
 	switch {
 	case msg.Error != nil:
-		// buzz-acp leaves an asker waiting otherwise: say why there is no answer.
+		// buzz-acp leaves an asker waiting otherwise: say why there is no
+		// answer. And tell buzz-acp the turn ended normally: it retries a
+		// prompt that fails, up to ten times with backoff, and each retry is a
+		// new fleet turn that may repeat what the failed one did (tools
+		// included) and posts the same error again. The asker can ask again.
 		text = "fleet could not answer: " + msg.Error.Message
+		out = []byte(`{"jsonrpc":"2.0","id":` + string(msg.ID) + `,"result":{"stopReason":"end_turn"}}` + "\n")
 	case stopReason(msg.Result) == "cancelled":
 		// Stopped on purpose: what streamed before is not an answer, unless
 		// fleet's note says the Stop came too late or was not confirmed.
@@ -340,17 +349,21 @@ func (b *bridge) observe(line []byte) {
 		case strings.Contains(full, notConfirmedNote):
 			text = strings.TrimSpace(full[strings.Index(full, notConfirmedNote):])
 		default:
-			return
+			return nil
 		}
 	case text == "":
 		b.log.Print("the turn ended with no answer text; nothing posted")
-		return
+		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	if err := b.post(ctx, t.buzz, text); err != nil {
 		b.log.Printf("posting the answer to #%s failed: %v", t.buzz.channelName, err)
 	}
+	if out != nil {
+		b.log.Printf("fleet's error was posted; buzz-acp is told the turn ended, so it does not retry it")
+	}
+	return out
 }
 
 func stopReason(result json.RawMessage) string {

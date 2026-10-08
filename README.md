@@ -24,7 +24,9 @@ relays every JSON-RPC line both ways, except that it:
   call is left out), with
   `buzz messages send --channel <channel> --reply-to <event> --content -` to
   the thread `buzz-acp` named, before passing the end of the turn on. An error
-  is posted as `fleet could not answer: <reason>`. A cancelled turn posts
+  is posted as `fleet could not answer: <reason>`, and `buzz-acp` is told the
+  turn ended: it retries a failed prompt up to ten times, and each retry would
+  be a new fleet turn and a repeated reply. A cancelled turn posts
   nothing, unless fleet says the Stop came after the turn had finished (its
   answer and that note are posted) or that it could not confirm the Stop (that
   note is posted); a turn with no answer text posts nothing.

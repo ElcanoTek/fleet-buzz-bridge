@@ -252,8 +252,15 @@ func TestAnErrorIsPostedSoTheAskerIsNotLeftWaiting(t *testing.T) {
 	if body, _ := h.file("buzz-stdin"); body != "fleet could not answer: the fleet turn did not finish within 15s and was stopped" {
 		t.Errorf("posted %q", body)
 	}
-	if _, ok := lines[len(lines)-1]["error"]; !ok {
-		t.Error("the error was not passed on to buzz-acp")
+	// buzz-acp retries a failed prompt, and each retry is a new fleet turn
+	// (seen live: a timeout re-ran four times and posted four replies). The
+	// asker has been told, so buzz-acp is told the turn ended.
+	last := lines[len(lines)-1]
+	if _, isErr := last["error"]; isErr {
+		t.Error("the error was passed on: buzz-acp would retry the turn")
+	}
+	if r, _ := last["result"].(map[string]any); r["stopReason"] != "end_turn" {
+		t.Errorf("buzz-acp got %v, want the turn reported as ended", last)
 	}
 }
 
