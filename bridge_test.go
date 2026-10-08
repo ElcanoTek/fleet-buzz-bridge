@@ -64,6 +64,10 @@ func fakeAgent() {
 		case "initialize":
 			reply(map[string]any{"result": map[string]any{"protocolVersion": 1}})
 		case "session/new":
+			if mode == "refuse-session" {
+				reply(map[string]any{"error": map[string]any{"code": -32000, "message": "server rejected the request (403): nobody@example.com is not a fleet user"}})
+				continue
+			}
 			reply(map[string]any{"result": map[string]any{"sessionId": "s1"}})
 		case "session/prompt":
 			var text strings.Builder
@@ -338,5 +342,33 @@ func TestAnUnconfirmedStopPostsFleetsNote(t *testing.T) {
 	want := "fleet could not confirm this turn stopped (timeout). It may still be running: stop it at http://fleet.test/chat?c=1"
 	if body, _ := h.file("buzz-stdin"); body != want {
 		t.Errorf("posted %q", body)
+	}
+}
+
+// fleet acp refuses session/new for a credential problem, before any prompt.
+// Passed on, buzz-acp would retry the mention up to ten times and the asker
+// would see nothing (seen live). Instead buzz-acp gets a session, and the
+// prompt on it is answered with fleet's reason, without reaching fleet.
+func TestARefusedSessionTellsTheAskerWhy(t *testing.T) {
+	h := startBridge(t, "refuse-session")
+	h.send(1, "initialize", map[string]any{"protocolVersion": 1})
+	h.until(1)
+	h.send(2, "session/new", map[string]any{"cwd": "/tmp", "mcpServers": []any{}})
+	lines := h.until(2)
+	res, _ := lines[len(lines)-1]["result"].(map[string]any)
+	sid, _ := res["sessionId"].(string)
+	if sid == "" {
+		t.Fatalf("session/new answered %v, want a placeholder session", lines[len(lines)-1])
+	}
+	h.send(3, "session/prompt", map[string]any{"sessionId": sid, "prompt": []any{map[string]any{"type": "text", "text": firstPrompt(t)}}})
+	lines = h.until(3)
+	if r, _ := lines[len(lines)-1]["result"].(map[string]any); r["stopReason"] != "end_turn" {
+		t.Errorf("prompt answered %v, want end_turn", lines[len(lines)-1])
+	}
+	if body, _ := h.file("buzz-stdin"); body != "fleet could not answer: server rejected the request (403): nobody@example.com is not a fleet user" {
+		t.Errorf("posted %q", body)
+	}
+	if _, ok := h.file("agent-prompt"); ok {
+		t.Error("the prompt reached the agent that refused the session")
 	}
 }

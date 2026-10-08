@@ -90,16 +90,19 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, env []string)
 	}()
 
 	b := &bridge{
-		log:     logger,
-		post:    cliPoster(env, logger),
-		pending: map[string]*turn{},
+		log:        logger,
+		post:       cliPoster(env, logger),
+		client:     stdout,
+		pending:    map[string]*turn{},
+		sessionNew: map[string]bool{},
+		refused:    map[string]string{},
 	}
 	go func() {
 		b.clientToAgent(stdin, toAgent)
 		// The client hung up: close the agent's stdin so it sees the same.
 		_ = toAgent.Close()
 	}()
-	b.agentToClient(fromAgent, stdout)
+	b.agentToClient(fromAgent)
 	if err := cmd.Wait(); err != nil {
 		if exit, ok := err.(*exec.ExitError); ok {
 			return exit.ExitCode()
@@ -170,8 +173,22 @@ type bridge struct {
 	log  *log.Logger
 	post func(ctx context.Context, t buzzTurn, text string) error
 
-	mu      sync.Mutex
-	pending map[string]*turn // by JSON-RPC request id, as raw JSON
+	outMu  sync.Mutex // the bridge answers some requests itself, besides relaying
+	client io.Writer  // buzz-acp
+
+	mu         sync.Mutex
+	pending    map[string]*turn  // by JSON-RPC request id, as raw JSON
+	sessionNew map[string]bool   // session/new request ids awaiting the agent's answer
+	refused    map[string]string // placeholder session id → why the agent refused it
+	nRefused   int
+}
+
+func (b *bridge) toClient(line []byte) {
+	b.outMu.Lock()
+	defer b.outMu.Unlock()
+	if _, err := b.client.Write(line); err != nil {
+		b.log.Printf("write to client: %v", err)
+	}
 }
 
 // message is the part of a JSON-RPC line the bridge reads.
@@ -204,6 +221,9 @@ func readLines(r io.Reader, fn func(line []byte)) {
 
 func (b *bridge) clientToAgent(from io.Reader, to io.Writer) {
 	readLines(from, func(line []byte) {
+		if b.handleRefusedSession(line) {
+			return
+		}
 		if out, ok := b.rewritePrompt(line); ok {
 			line = out
 		}
@@ -225,19 +245,7 @@ func (b *bridge) rewritePrompt(line []byte) ([]byte, bool) {
 	if json.Unmarshal(msg.Params, &params) != nil {
 		return nil, false
 	}
-	var blocks []map[string]json.RawMessage
-	if json.Unmarshal(params["prompt"], &blocks) != nil {
-		return nil, false
-	}
-	var text strings.Builder
-	for _, blk := range blocks {
-		var typ, s string
-		_ = json.Unmarshal(blk["type"], &typ)
-		if typ == "text" && json.Unmarshal(blk["text"], &s) == nil {
-			text.WriteString(s)
-		}
-	}
-	bt, ok := parseBuzzTurn(text.String())
+	bt, ok := parseBuzzTurn(promptText(params["prompt"]))
 	if !ok {
 		b.log.Print("a prompt not in buzz-acp's format was passed through as is; its answer will not be posted")
 		return nil, false
@@ -265,15 +273,86 @@ func (b *bridge) rewritePrompt(line []byte) ([]byte, bool) {
 	return append(out, '\n'), true
 }
 
-func (b *bridge) agentToClient(from io.Reader, to io.Writer) {
+func (b *bridge) agentToClient(from io.Reader) {
 	readLines(from, func(line []byte) {
 		if out := b.observe(line); out != nil {
 			line = out
 		}
-		if _, err := to.Write(line); err != nil {
-			b.log.Printf("write to client: %v", err)
-		}
+		b.toClient(line)
 	})
+}
+
+// A session the agent refused to open (fleet acp checks the user and token at
+// session/new) gets a placeholder session instead of the error: buzz-acp
+// would otherwise retry the mention up to ten times and the asker would see
+// nothing, since there is no prompt yet to answer. Prompts on the
+// placeholder are answered here, with the agent's reason posted to the
+// thread, and never reach the agent.
+func (b *bridge) handleRefusedSession(line []byte) bool {
+	var msg message
+	if json.Unmarshal(line, &msg) != nil {
+		return false
+	}
+	if msg.Method == "session/new" && len(msg.ID) > 0 {
+		b.mu.Lock()
+		b.sessionNew[string(msg.ID)] = true
+		b.mu.Unlock()
+		return false
+	}
+	var p struct {
+		SessionID string          `json:"sessionId"`
+		Prompt    json.RawMessage `json:"prompt"`
+	}
+	if msg.Method == "" || json.Unmarshal(msg.Params, &p) != nil {
+		return false
+	}
+	b.mu.Lock()
+	reason, refused := b.refused[p.SessionID]
+	b.mu.Unlock()
+	if !refused {
+		return false
+	}
+	switch msg.Method {
+	case "session/prompt":
+		bt, ok := parseBuzzTurn(promptText(p.Prompt))
+		if !ok {
+			b.toClient([]byte(`{"jsonrpc":"2.0","id":` + string(msg.ID) + `,"error":{"code":-32000,"message":` + jsonString(reason) + `}}` + "\n"))
+			return true
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		if err := b.post(ctx, bt, "fleet could not answer: "+reason); err != nil {
+			b.log.Printf("posting the agent's refusal to #%s failed: %v", bt.channelName, err)
+		}
+		b.toClient([]byte(`{"jsonrpc":"2.0","id":` + string(msg.ID) + `,"result":{"stopReason":"end_turn"}}` + "\n"))
+	case "session/close":
+		if len(msg.ID) > 0 {
+			b.toClient([]byte(`{"jsonrpc":"2.0","id":` + string(msg.ID) + `,"result":{}}` + "\n"))
+		}
+	}
+	return true // session/cancel and anything else on the placeholder is dropped
+}
+
+// promptText joins the text blocks of an ACP prompt.
+func promptText(raw json.RawMessage) string {
+	var blocks []map[string]json.RawMessage
+	if json.Unmarshal(raw, &blocks) != nil {
+		return ""
+	}
+	var text strings.Builder
+	for _, blk := range blocks {
+		var typ, s string
+		_ = json.Unmarshal(blk["type"], &typ)
+		if typ == "text" && json.Unmarshal(blk["text"], &s) == nil {
+			text.WriteString(s)
+		}
+	}
+	return text.String()
+}
+
+func jsonString(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
 }
 
 // observe collects a turn's answer and, when its response arrives, posts it.
@@ -320,6 +399,19 @@ func (b *bridge) observe(line []byte) []byte {
 		return nil
 	}
 	b.mu.Lock()
+	if b.sessionNew[string(msg.ID)] {
+		delete(b.sessionNew, string(msg.ID))
+		if msg.Error == nil {
+			b.mu.Unlock()
+			return nil
+		}
+		b.nRefused++
+		placeholder := fmt.Sprintf("fleet-buzz-bridge-refused-%d", b.nRefused)
+		b.refused[placeholder] = msg.Error.Message
+		b.mu.Unlock()
+		b.log.Printf("the agent refused a session (%s); its prompts will be answered with that reason", msg.Error.Message)
+		return []byte(`{"jsonrpc":"2.0","id":` + string(msg.ID) + `,"result":{"sessionId":` + jsonString(placeholder) + `}}` + "\n")
+	}
 	t := b.pending[string(msg.ID)]
 	delete(b.pending, string(msg.ID))
 	b.mu.Unlock()

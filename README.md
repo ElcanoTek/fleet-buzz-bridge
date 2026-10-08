@@ -30,6 +30,12 @@ relays every JSON-RPC line both ways, except that it:
   nothing, unless fleet says the Stop came after the turn had finished (its
   answer and that note are posted) or that it could not confirm the Stop (that
   note is posted); a turn with no answer text posts nothing.
+- **answers a refused session.** When `fleet acp` refuses `session/new` (a
+  wrong token, a user that is not in fleet, a viewer), `buzz-acp` would retry
+  the mention up to ten times and the asker would see nothing. The bridge
+  gives `buzz-acp` a placeholder session instead, and answers its prompt by
+  posting `fleet could not answer: <fleet's reason>` to the thread; the prompt
+  never reaches fleet.
 - **keeps Buzz's credentials from fleet.** `BUZZ_PRIVATE_KEY` and the other
   Buzz credential variables are removed from `fleet acp`'s environment; only
   the bridge posts.
