@@ -25,7 +25,8 @@ type buzzTurn struct {
 }
 
 type buzzEvent struct {
-	from    string // display name
+	from    string // display name, or the npub when buzz-acp had no name for the sender
+	named   bool   // buzz-acp gave the sender's profile name
 	pubkey  string // hex, for mentioning the sender in the reply
 	content string
 }
@@ -173,6 +174,7 @@ func parseEvent(block string) (ev buzzEvent, id string) {
 	ev.from = "someone"
 	if m := fromLine.FindStringSubmatch(block); m != nil {
 		ev.from = displayName(m[1])
+		ev.named = strings.Contains(m[1], " (npub: ")
 		if h := fromHex.FindStringSubmatch(m[1]); h != nil {
 			ev.pubkey = h[1]
 		}

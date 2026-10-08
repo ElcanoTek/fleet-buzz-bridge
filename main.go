@@ -35,6 +35,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -92,11 +93,13 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, env []string)
 	b := &bridge{
 		log:        logger,
 		post:       cliPoster(env, logger),
+		names:      cliNames(env),
 		client:     stdout,
 		pending:    map[string]*turn{},
 		sessionNew: map[string]bool{},
 		refused:    map[string]string{},
 		mentioned:  map[string][]time.Time{},
+		knownNames: map[string]string{},
 		now:        time.Now,
 	}
 	go func() {
@@ -172,9 +175,10 @@ func (t *turn) answer() string {
 }
 
 type bridge struct {
-	log  *log.Logger
-	post func(ctx context.Context, t buzzTurn, text string, mentions []string) error
-	now  func() time.Time
+	log   *log.Logger
+	post  func(ctx context.Context, t buzzTurn, text string, mentions []string) error
+	names func(ctx context.Context, pubkeys []string) (map[string]string, error) // display name by pubkey
+	now   func() time.Time
 
 	outMu  sync.Mutex // the bridge answers some requests itself, besides relaying
 	client io.Writer  // buzz-acp
@@ -185,6 +189,7 @@ type bridge struct {
 	refused    map[string]string // placeholder session id → why the agent refused it
 	nRefused   int
 	mentioned  map[string][]time.Time // thread|asker → when the bridge last mentioned them
+	knownNames map[string]string      // pubkey → name looked up for an asker buzz-acp gave no name
 }
 
 // A reply mentions whoever asked: Buzz agents (and buzz-acp) wake on a
@@ -200,7 +205,8 @@ const (
 
 // address puts an @mention of each distinct asker in front of text and
 // returns their pubkeys, for the post's mention tags.
-func (b *bridge) address(t buzzTurn, text string) (string, []string) {
+func (b *bridge) address(ctx context.Context, t buzzTurn, text string) (string, []string) {
+	b.lookUpNames(ctx, t)
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	now := b.now()
@@ -211,6 +217,10 @@ func (b *bridge) address(t buzzTurn, text string) (string, []string) {
 			continue
 		}
 		seen[ev.pubkey] = true
+		name := ev.from
+		if n := b.knownNames[ev.pubkey]; !ev.named && n != "" {
+			name = n
+		}
 		key := t.replyTo + "|" + ev.pubkey
 		var recent []time.Time
 		for _, at := range b.mentioned[key] {
@@ -220,17 +230,56 @@ func (b *bridge) address(t buzzTurn, text string) (string, []string) {
 		}
 		if len(recent) >= maxMentions {
 			b.mentioned[key] = recent
-			b.log.Printf("not mentioning %s again in this thread: %d mentioned replies in %s", ev.from, len(recent), mentionWindow)
+			b.log.Printf("not mentioning %s again in this thread: %d mentioned replies in %s", name, len(recent), mentionWindow)
 			continue
 		}
 		b.mentioned[key] = append(recent, now)
-		names = append(names, "@"+ev.from)
+		names = append(names, "@"+name)
 		keys = append(keys, ev.pubkey)
 	}
 	if len(names) == 0 {
 		return text, nil
 	}
 	return strings.Join(names, " ") + " " + text, keys
+}
+
+// nameLookupTimeout bounds looking up askers' names, which comes out of the
+// time a reply has to be posted.
+const nameLookupTimeout = 10 * time.Second
+
+// lookUpNames finds the profile name of each asker buzz-acp gave only a key
+// for, so a reply mentions them by name and not as "@npub1…". Seen live:
+// buzz-acp looks up names for a turn's new message, the keys it mentions and
+// the thread, but not for the sender of the request it stopped to merge a new
+// message in, so that asker came as "npub1… (hex: …)". A name found is kept
+// for the bridge's lifetime; on a failed lookup the npub stays.
+func (b *bridge) lookUpNames(ctx context.Context, t buzzTurn) {
+	if b.names == nil {
+		return
+	}
+	var missing []string
+	b.mu.Lock()
+	for _, ev := range t.askers() {
+		if !ev.named && ev.pubkey != "" && b.knownNames[ev.pubkey] == "" && !slices.Contains(missing, ev.pubkey) {
+			missing = append(missing, ev.pubkey)
+		}
+	}
+	b.mu.Unlock()
+	if len(missing) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, nameLookupTimeout)
+	defer cancel()
+	found, err := b.names(ctx, missing)
+	if err != nil {
+		b.log.Printf("looking up the name of %d asker(s) failed, so they are mentioned by npub: %v", len(missing), err)
+		return
+	}
+	b.mu.Lock()
+	for k, n := range found {
+		b.knownNames[k] = n
+	}
+	b.mu.Unlock()
 }
 
 func (b *bridge) toClient(line []byte) {
@@ -371,7 +420,7 @@ func (b *bridge) handleRefusedSession(line []byte) bool {
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
-		text, mentions := b.address(bt, "fleet could not answer: "+reason)
+		text, mentions := b.address(ctx, bt, "fleet could not answer: "+reason)
 		if err := b.post(ctx, bt, text, mentions); err != nil {
 			b.log.Printf("posting the agent's refusal to #%s failed: %v", bt.channelName, err)
 		}
@@ -500,7 +549,7 @@ func (b *bridge) observe(line []byte) []byte {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	text, mentions := b.address(t.buzz, text)
+	text, mentions := b.address(ctx, t.buzz, text)
 	if err := b.post(ctx, t.buzz, text, mentions); err != nil {
 		b.log.Printf("posting the answer to #%s failed: %v", t.buzz.channelName, err)
 	}
@@ -518,16 +567,62 @@ func stopReason(result json.RawMessage) string {
 	return r.StopReason
 }
 
-// cliPoster posts with the Buzz CLI as the agent's own identity: the CLI reads
-// BUZZ_PRIVATE_KEY and BUZZ_RELAY_URL from env, which buzz-acp provides. The
-// CLI is $FLEET_BUZZ_CLI, else `buzz` on PATH.
-func cliPoster(env []string, logger *log.Logger) func(context.Context, buzzTurn, string, []string) error {
+// buzzCLI is the Buzz CLI the bridge runs: $FLEET_BUZZ_CLI, else `buzz` on
+// PATH. It runs as the agent's own identity: it reads BUZZ_PRIVATE_KEY and
+// BUZZ_RELAY_URL from env, which buzz-acp provides.
+func buzzCLI(env []string) string {
 	cli := "buzz"
 	for _, kv := range env {
 		if v, ok := strings.CutPrefix(kv, "FLEET_BUZZ_CLI="); ok && v != "" {
 			cli = v
 		}
 	}
+	return cli
+}
+
+// cliNames looks up profile names with `buzz users get`. A key with no name
+// in its profile is left out of the result.
+func cliNames(env []string) func(context.Context, []string) (map[string]string, error) {
+	cli := buzzCLI(env)
+	return func(ctx context.Context, pubkeys []string) (map[string]string, error) {
+		args := []string{"users", "get"}
+		for _, k := range pubkeys {
+			args = append(args, "--pubkey", k)
+		}
+		cmd := exec.CommandContext(ctx, cli, args...)
+		cmd.Env = env
+		var out, errOut bytes.Buffer
+		cmd.Stdout = &out
+		cmd.Stderr = &errOut
+		if err := cmd.Run(); err != nil {
+			return nil, fmt.Errorf("%s users get: %v: %s", cli, err, strings.TrimSpace(errOut.String()))
+		}
+		var profiles []struct {
+			Pubkey      string `json:"pubkey"`
+			DisplayName string `json:"display_name"`
+			Name        string `json:"name"`
+		}
+		if err := json.Unmarshal(out.Bytes(), &profiles); err != nil {
+			return nil, fmt.Errorf("%s users get: %v", cli, err)
+		}
+		names := map[string]string{}
+		for _, p := range profiles {
+			n := p.DisplayName
+			if strings.TrimSpace(n) == "" {
+				n = p.Name
+			}
+			// One line, as buzz-acp shows a name: it goes in front of the reply.
+			if n = strings.Join(strings.Fields(n), " "); n != "" {
+				names[strings.ToLower(p.Pubkey)] = n
+			}
+		}
+		return names, nil
+	}
+}
+
+// cliPoster posts with the Buzz CLI.
+func cliPoster(env []string, logger *log.Logger) func(context.Context, buzzTurn, string, []string) error {
+	cli := buzzCLI(env)
 	return func(ctx context.Context, t buzzTurn, text string, mentions []string) error {
 		args := []string{"messages", "send", "--channel", t.channelID, "--content", "-"}
 		if t.replyTo != "" {

@@ -2,7 +2,9 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"os"
@@ -128,9 +130,12 @@ func startBridge(t *testing.T, mode string) *harness {
 	t.Helper()
 	dir := t.TempDir()
 	// A stand-in for the Buzz CLI on the bridge's side: it records how it was
-	// called, what it was given to post, and whether it could see the key.
+	// called, what it was given to post, and whether it could see the key. A
+	// name lookup (users get) is recorded apart and finds kristian.
 	cli := filepath.Join(dir, "buzz")
-	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"" + dir + "/buzz-args\"\ncat > \"" + dir + "/buzz-stdin\"\n" +
+	script := "#!/bin/sh\nif [ \"$1\" = users ]; then\n  printf '%s\\n' \"$@\" > \"" + dir + "/buzz-users-args\"\n" +
+		"  echo '[{\"display_name\":\"kristian\",\"pubkey\":\"" + kristianHex + "\"}]'\n  exit 0\nfi\n" +
+		"printf '%s\\n' \"$@\" > \"" + dir + "/buzz-args\"\ncat > \"" + dir + "/buzz-stdin\"\n" +
 		"[ -n \"$BUZZ_PRIVATE_KEY\" ] && echo 1 > \"" + dir + "/buzz-has-key\"\nexit 0\n"
 	if err := os.WriteFile(cli, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
@@ -216,6 +221,9 @@ func TestPostsTheAnswerToTheBuzzThread(t *testing.T) {
 	if body, _ := h.file("buzz-stdin"); body != "@alice Hello world" {
 		t.Errorf("posted %q, want the streamed answer trimmed, addressed to the asker", body)
 	}
+	if _, looked := h.file("buzz-users-args"); looked {
+		t.Error("looked up a name buzz-acp had given")
+	}
 	if k, _ := h.file("buzz-has-key"); strings.TrimSpace(k) != "1" {
 		t.Error("the Buzz CLI did not get BUZZ_PRIVATE_KEY: it posts as the agent's identity")
 	}
@@ -256,6 +264,22 @@ func TestABatchedTurnIsPostedToEveryAsker(t *testing.T) {
 	}
 	if body, _ := h.file("buzz-stdin"); body != "@kristian @Fizz Hello world" {
 		t.Errorf("posted %q", body)
+	}
+}
+
+// Seen live: in a merged turn, buzz-acp gave the sender of the request it
+// stopped as an npub, and the reply mentioned "@npub1…". The bridge looks the
+// name up.
+func TestAStoppedRequestsAskerIsMentionedByName(t *testing.T) {
+	h := startBridge(t, "answer")
+	h.promptBuzz(t, "<context>\nScope: thread\nChannel: general (#"+fixtureChannel+")\nIMPORTANT: reply with `--reply-to "+fizzMsg+"`\n</context>\n\n"+
+		"<what-you-were-working-on>\n"+listed(1, kristianMsg, "npub1kristian", kristianHex, "@Fizz ask @fleet")+"\n</what-you-were-working-on>\n\n"+
+		"<new-message-arrived-while-you-were-working>\n"+listed(1, fizzMsg, "Fizz", fizzHex, "@fleet what's new?")+"\n</new-message-arrived-while-you-were-working>")
+	if body, _ := h.file("buzz-stdin"); body != "@kristian @Fizz Hello world" {
+		t.Errorf("posted %q", body)
+	}
+	if args, _ := h.file("buzz-users-args"); args != "users\nget\n--pubkey\n"+kristianHex+"\n" {
+		t.Errorf("names looked up with\n%s", args)
 	}
 }
 
@@ -395,7 +419,7 @@ func addressTurn(events ...buzzEvent) buzzTurn {
 }
 
 func newTestBridge(now *time.Time) *bridge {
-	return &bridge{log: log.New(io.Discard, "", 0), mentioned: map[string][]time.Time{}, now: func() time.Time { return *now }}
+	return &bridge{log: log.New(io.Discard, "", 0), mentioned: map[string][]time.Time{}, knownNames: map[string]string{}, now: func() time.Time { return *now }}
 }
 
 // Each distinct asker is mentioned once, by name and by key.
@@ -404,7 +428,7 @@ func TestRepliesMentionEachAsker(t *testing.T) {
 	b := newTestBridge(&now)
 	alice := buzzEvent{from: "alice", pubkey: strings.Repeat("a", 64), content: "x"}
 	fizz := buzzEvent{from: "Fizz", pubkey: strings.Repeat("f", 64), content: "y"}
-	text, keys := b.address(addressTurn(alice, fizz, alice), "the answer")
+	text, keys := b.address(context.Background(), addressTurn(alice, fizz, alice), "the answer")
 	if text != "@alice @Fizz the answer" {
 		t.Errorf("text = %q", text)
 	}
@@ -412,7 +436,7 @@ func TestRepliesMentionEachAsker(t *testing.T) {
 		t.Errorf("mentions = %v", keys)
 	}
 	// A sender whose key the prompt did not carry is not mentioned.
-	if text, keys := b.address(addressTurn(buzzEvent{from: "someone", content: "z"}), "a"); text != "a" || keys != nil {
+	if text, keys := b.address(context.Background(), addressTurn(buzzEvent{from: "someone", content: "z"}), "a"); text != "a" || keys != nil {
 		t.Errorf("text = %q, mentions = %v", text, keys)
 	}
 }
@@ -425,21 +449,52 @@ func TestMentionsAreCappedPerAskerAndThread(t *testing.T) {
 	b := newTestBridge(&now)
 	fizz := buzzEvent{from: "Fizz", pubkey: strings.Repeat("f", 64), content: "y"}
 	for i := 0; i < maxMentions; i++ {
-		if _, keys := b.address(addressTurn(fizz), "r"); len(keys) != 1 {
+		if _, keys := b.address(context.Background(), addressTurn(fizz), "r"); len(keys) != 1 {
 			t.Fatalf("reply %d did not mention the asker", i+1)
 		}
 		now = now.Add(time.Minute)
 	}
-	if text, keys := b.address(addressTurn(fizz), "r"); text != "r" || keys != nil {
+	if text, keys := b.address(context.Background(), addressTurn(fizz), "r"); text != "r" || keys != nil {
 		t.Errorf("reply %d mentioned again: %q %v", maxMentions+1, text, keys)
 	}
 	other := addressTurn(fizz)
 	other.replyTo = strings.Repeat("e", 64)
-	if _, keys := b.address(other, "r"); len(keys) != 1 {
+	if _, keys := b.address(context.Background(), other, "r"); len(keys) != 1 {
 		t.Error("the cap leaked into another thread")
 	}
 	now = now.Add(mentionWindow)
-	if _, keys := b.address(addressTurn(fizz), "r"); len(keys) != 1 {
+	if _, keys := b.address(context.Background(), addressTurn(fizz), "r"); len(keys) != 1 {
 		t.Error("still capped after the window passed")
+	}
+}
+
+// A name is looked up once, only for an asker buzz-acp gave no name; when
+// the lookup fails, the asker is still mentioned, by npub.
+func TestNamesAreLookedUpOnlyWhenMissing(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	b := newTestBridge(&now)
+	var calls [][]string
+	b.names = func(_ context.Context, keys []string) (map[string]string, error) {
+		calls = append(calls, keys)
+		if keys[0] == kristianHex {
+			return map[string]string{kristianHex: "kristian"}, nil
+		}
+		return nil, errors.New("relay unreachable")
+	}
+	kristian := buzzEvent{from: "npub1kristian", pubkey: kristianHex, content: "x"}
+	fizz := buzzEvent{from: "Fizz", named: true, pubkey: fizzHex, content: "y"}
+	turn := addressTurn(fizz)
+	turn.earlier = []buzzEvent{kristian}
+	for i := 0; i < 2; i++ {
+		if text, _ := b.address(context.Background(), turn, "the answer"); text != "@kristian @Fizz the answer" {
+			t.Errorf("reply %d: text = %q", i+1, text)
+		}
+	}
+	if len(calls) != 1 || len(calls[0]) != 1 || calls[0][0] != kristianHex {
+		t.Errorf("lookups = %v, want one, for kristian only", calls)
+	}
+	other := buzzEvent{from: "npub1other", pubkey: strings.Repeat("c", 64), content: "z"}
+	if text, keys := b.address(context.Background(), addressTurn(other), "a"); text != "@npub1other a" || len(keys) != 1 {
+		t.Errorf("after a failed lookup: text = %q, mentions = %v", text, keys)
 	}
 }

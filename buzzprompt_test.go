@@ -31,7 +31,7 @@ func TestParsesARealBuzzPrompt(t *testing.T) {
 	if bt.channelID != fixtureChannel || bt.channelName != "general" || bt.replyTo != fixtureEvent {
 		t.Errorf("target = #%s %s reply-to %s", bt.channelName, bt.channelID, bt.replyTo)
 	}
-	if len(bt.events) != 1 || bt.events[0].from != "alice" || bt.events[0].content != "@fleet hey" {
+	if len(bt.events) != 1 || bt.events[0].from != "alice" || !bt.events[0].named || bt.events[0].content != "@fleet hey" {
 		t.Errorf("events = %+v", bt.events)
 	}
 	p := bt.prompt()
@@ -76,8 +76,12 @@ func TestKeepsEarlierContextAndMultiLineMessages(t *testing.T) {
 // format_event_block in its queue.rs at 70d2ca7): under an "--- Event N ---"
 // heading, with no <buzz-event> around it.
 func listed(n int, id, from, hex, content string) string {
+	sender := from + " (npub: npub1" + hex[:6] + ", hex: " + hex + ")"
+	if strings.HasPrefix(from, "npub1") { // no name for the sender: buzz-acp shows the npub alone
+		sender = from + " (hex: " + hex + ")"
+	}
 	return "--- Event " + string(rune('0'+n)) + " (@mention) ---\nEvent ID: " + id + "\nChannel: general (#" + fixtureChannel + ")\nKind: 9\n" +
-		"From: " + from + " (npub: npub1" + hex[:6] + ", hex: " + hex + ")\nTime: 2026-10-08T14:42:19+00:00\n" +
+		"From: " + sender + "\nTime: 2026-10-08T14:42:19+00:00\n" +
 		"Content: " + content + "\nTags: [[\"p\",\"" + strings.Repeat("0", 64) + "\"]]\nParsed: mentions=[fleet (" + strings.Repeat("0", 64) + ")]"
 }
 
@@ -175,8 +179,8 @@ func TestUnnamedSendersAndAttachedFiles(t *testing.T) {
 	if !ok {
 		t.Fatal("not recognised")
 	}
-	if bt.events[0].from != "npub1tester" {
-		t.Errorf("from = %q", bt.events[0].from)
+	if bt.events[0].from != "npub1tester" || bt.events[0].named {
+		t.Errorf("from = %q, named = %v", bt.events[0].from, bt.events[0].named)
 	}
 	p := bt.prompt()
 	if !strings.Contains(p, "need a Buzz login, so they cannot be opened from here") {

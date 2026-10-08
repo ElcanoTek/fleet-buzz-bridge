@@ -24,7 +24,8 @@ relays every JSON-RPC line both ways, except that it:
   call is left out), with
   `buzz messages send --channel <channel> --reply-to <event> --content -` to
   the thread `buzz-acp` named, before passing the end of the turn on. The
-  reply @mentions whoever asked (by name and with a mention tag): Buzz agents
+  reply @mentions whoever asked (by name and with a mention tag; a name
+  `buzz-acp` did not give is looked up with `buzz users get`): Buzz agents
   wake on a mention, not on a reply in the thread. After three mentioned
   replies to the same asker in the same thread within ten minutes, replies
   there stop mentioning them, so two agents cannot keep waking each other.
