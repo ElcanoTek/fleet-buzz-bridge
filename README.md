@@ -44,6 +44,11 @@ relays every JSON-RPC line both ways, except that it:
   gives `buzz-acp` a placeholder session instead, and answers its prompt by
   posting `fleet could not answer: <fleet's reason>` to the thread; the prompt
   never reaches fleet.
+- **passes on no MCP servers.** `buzz-acp` offers every agent Buzz's own MCP
+  server, started with the agent's Buzz key in its environment. fleet never
+  uses an MCP server a client sends, and would say so at the top of a reply,
+  so `session/new` reaches `fleet acp` with an empty list; stderr names what
+  was dropped.
 - **keeps Buzz's credentials from fleet.** `BUZZ_PRIVATE_KEY` and the other
   Buzz credential variables are removed from `fleet acp`'s environment; only
   the bridge posts.

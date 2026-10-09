@@ -67,6 +67,7 @@ func fakeAgent() {
 		case "initialize":
 			reply(map[string]any{"result": map[string]any{"protocolVersion": 1}})
 		case "session/new":
+			_ = os.WriteFile(filepath.Join(dir, "agent-session-new"), line, 0o600)
 			if mode == "refuse-session" {
 				reply(map[string]any{"error": map[string]any{"code": -32000, "message": "server rejected the request (403): nobody@example.com is not a fleet user"}})
 				continue
@@ -496,5 +497,32 @@ func TestNamesAreLookedUpOnlyWhenMissing(t *testing.T) {
 	other := buzzEvent{from: "npub1other", pubkey: strings.Repeat("c", 64), content: "z"}
 	if text, keys := b.address(context.Background(), addressTurn(other), "a"); text != "@npub1other a" || len(keys) != 1 {
 		t.Errorf("after a failed lookup: text = %q, mentions = %v", text, keys)
+	}
+}
+
+// buzz-acp offers its own MCP server with the agent's Buzz key in its env. It
+// never reaches fleet: the list is emptied, and nothing else in session/new
+// changes.
+func TestMCPServersBuzzOffersDoNotReachFleet(t *testing.T) {
+	h := startBridge(t, "answer")
+	h.send(1, "initialize", map[string]any{"protocolVersion": 1})
+	h.until(1)
+	h.send(2, "session/new", map[string]any{"cwd": "/tmp", "mcpServers": []any{map[string]any{
+		"name": "buzz-dev-mcp", "command": "/usr/local/bin/buzz-dev-mcp", "args": []any{},
+		"env": []any{map[string]any{"name": "BUZZ_PRIVATE_KEY", "value": "nsec1testonlynotakey"}},
+	}}})
+	lines := h.until(2)
+	if r, _ := lines[len(lines)-1]["result"].(map[string]any); r["sessionId"] != "s1" {
+		t.Fatalf("session/new answered %v", lines[len(lines)-1])
+	}
+	got, _ := h.file("agent-session-new")
+	if strings.Contains(got, "buzz-dev-mcp") || strings.Contains(got, "nsec1") {
+		t.Errorf("the agent got Buzz's MCP server: %s", got)
+	}
+	if !strings.Contains(got, `"mcpServers":[]`) || !strings.Contains(got, `"cwd":"/tmp"`) {
+		t.Errorf("session/new reached the agent as %s", got)
+	}
+	if !strings.Contains(h.stderr.String(), `"buzz-dev-mcp"`) {
+		t.Errorf("stderr does not say what was dropped:\n%s", h.stderr)
 	}
 }

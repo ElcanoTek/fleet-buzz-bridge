@@ -325,11 +325,56 @@ func (b *bridge) clientToAgent(from io.Reader, to io.Writer) {
 		}
 		if out, ok := b.rewritePrompt(line); ok {
 			line = out
+		} else if out, ok := b.dropMCPServers(line); ok {
+			line = out
 		}
 		if _, err := to.Write(line); err != nil {
 			b.log.Printf("write to agent: %v", err)
 		}
 	})
+}
+
+// dropMCPServers empties the MCP servers a session/new offers the agent.
+// buzz-acp offers every agent Buzz's own (buzz-dev-mcp in Buzz's agent image),
+// started with the agent's Buzz key in its env; fleet never uses an MCP server
+// a client sends (its tools come from its operator), and would tell the user
+// so at the top of a reply. So the list never reaches fleet: the key stays
+// with the bridge, and replies carry no notice meant for an editor.
+func (b *bridge) dropMCPServers(line []byte) ([]byte, bool) {
+	var msg message
+	if json.Unmarshal(line, &msg) != nil || msg.Method != "session/new" {
+		return nil, false
+	}
+	var params map[string]json.RawMessage
+	if json.Unmarshal(msg.Params, &params) != nil {
+		return nil, false
+	}
+	var servers []struct {
+		Name string `json:"name"`
+	}
+	if json.Unmarshal(params["mcpServers"], &servers) != nil || len(servers) == 0 {
+		return nil, false
+	}
+	params["mcpServers"] = json.RawMessage("[]")
+	newParams, err := json.Marshal(params)
+	if err != nil {
+		return nil, false
+	}
+	var full map[string]json.RawMessage
+	if json.Unmarshal(line, &full) != nil {
+		return nil, false
+	}
+	full["params"] = newParams
+	out, err := json.Marshal(full)
+	if err != nil {
+		return nil, false
+	}
+	names := make([]string, 0, len(servers))
+	for _, s := range servers {
+		names = append(names, fmt.Sprintf("%q", s.Name))
+	}
+	b.log.Printf("not passing on the %d MCP server(s) buzz-acp offered (%s): fleet's tools come from its operator", len(servers), strings.Join(names, ", "))
+	return append(out, '\n'), true
 }
 
 // rewritePrompt replaces a buzz-acp session/prompt's text with the bridge's
