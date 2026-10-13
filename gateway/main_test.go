@@ -57,7 +57,7 @@ func TestTheTokenAndUserArePinned(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if len(chat.got) != 1 {
 		t.Fatalf("%d requests reached fleet", len(chat.got))
 	}
@@ -97,7 +97,7 @@ func TestOnlyFleetACPsCallsAreForwarded(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		reached := len(chat.got) > before
 		if reached != c.pass || (!c.pass && resp.StatusCode != http.StatusForbidden) {
 			t.Errorf("%s %s: reached fleet = %v, status %d; want reached = %v", c.method, c.path, reached, resp.StatusCode, c.pass)
@@ -113,7 +113,7 @@ func TestATurnStreams(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.Header.Get("X-Fleet-Conversation-Id") != "conv-1" {
 		t.Error("the conversation header did not come back")
 	}

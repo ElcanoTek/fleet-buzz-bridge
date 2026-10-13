@@ -86,10 +86,10 @@ func listed(n int, id, from, hex, content string) string {
 }
 
 var (
-	kristianHex = strings.Repeat("8", 64)
-	fizzHex     = strings.Repeat("f", 64)
-	kristianMsg = strings.Repeat("1", 64)
-	fizzMsg     = strings.Repeat("2", 64)
+	carolHex = strings.Repeat("8", 64)
+	scoutHex = strings.Repeat("f", 64)
+	carolMsg = strings.Repeat("1", 64)
+	scoutMsg = strings.Repeat("2", 64)
 )
 
 // Seen live: a person's mention and an agent's, eight seconds apart, reached
@@ -99,21 +99,21 @@ var (
 func TestABatchIsAnsweredUnderItsLastMessage(t *testing.T) {
 	text := "<context>\nScope: channel\nChannel: general (#" + fixtureChannel + ")\n</context>\n\n" +
 		"<buzz-events count=\"2\">\n" +
-		listed(1, kristianMsg, "kristian", kristianHex, "@Fizz ask @fleet with the last Anthropic release") + "\n\n" +
-		listed(2, fizzMsg, "Fizz", fizzHex, "@fleet what's the latest Anthropic release?") +
+		listed(1, carolMsg, "carol", carolHex, "@Scout ask @fleet with the last Anthropic release") + "\n\n" +
+		listed(2, scoutMsg, "Scout", scoutHex, "@fleet what's the latest Anthropic release?") +
 		"\n</buzz-events>"
 	bt, ok := parseBuzzTurn(text)
 	if !ok || len(bt.events) != 2 {
 		t.Fatalf("ok=%v events=%+v", ok, bt.events)
 	}
-	if bt.replyTo != fizzMsg {
+	if bt.replyTo != scoutMsg {
 		t.Errorf("reply-to = %s, want the last message", bt.replyTo)
 	}
-	if bt.events[0].pubkey != kristianHex || bt.events[1].pubkey != fizzHex {
+	if bt.events[0].pubkey != carolHex || bt.events[1].pubkey != scoutHex {
 		t.Errorf("senders = %+v", bt.events)
 	}
 	p := bt.prompt()
-	if !strings.Contains(p, "Messages for you in the Buzz channel #general:\n\nkristian: @Fizz ask @fleet with the last Anthropic release\n\nFizz: @fleet what's the latest Anthropic release?") {
+	if !strings.Contains(p, "Messages for you in the Buzz channel #general:\n\ncarol: @Scout ask @fleet with the last Anthropic release\n\nScout: @fleet what's the latest Anthropic release?") {
 		t.Errorf("prompt:\n%s", p)
 	}
 	for _, gone := range []string{"--- Event", "Tags:", "npub", "Parsed:"} {
@@ -134,8 +134,8 @@ func TestAMergedTurnKeepsWhatTheAgentWasWorkingOn(t *testing.T) {
 			"The request you were working on, which was stopped:", "A message for you in the Buzz channel #general, which replaces it:", "Answer the new request."},
 	} {
 		text := "<context>\nScope: thread\nChannel: general (#" + fixtureChannel + ")\nIMPORTANT: reply with `--reply-to " + fixtureEvent + "`\n</context>\n\n" +
-			"<" + c.earlierTag + ">\n" + listed(1, kristianMsg, "kristian", kristianHex, "find the latest release") + "\n</" + c.earlierTag + ">\n\n" +
-			"<" + c.newTag + ">\n" + listed(1, fizzMsg, "Fizz", fizzHex, "and its price") + "\n</" + c.newTag + ">\n\n" +
+			"<" + c.earlierTag + ">\n" + listed(1, carolMsg, "carol", carolHex, "find the latest release") + "\n</" + c.earlierTag + ">\n\n" +
+			"<" + c.newTag + ">\n" + listed(1, scoutMsg, "Scout", scoutHex, "and its price") + "\n</" + c.newTag + ">\n\n" +
 			"Note: buzz-acp's closing note."
 		bt, ok := parseBuzzTurn(text)
 		if !ok {
@@ -144,15 +144,15 @@ func TestAMergedTurnKeepsWhatTheAgentWasWorkingOn(t *testing.T) {
 		if bt.replyTo != fixtureEvent {
 			t.Errorf("%s: reply-to = %s, want the one <context> names", c.newTag, bt.replyTo)
 		}
-		if len(bt.events) != 1 || bt.events[0].from != "Fizz" || len(bt.earlier) != 1 || bt.earlier[0].from != "kristian" {
+		if len(bt.events) != 1 || bt.events[0].from != "Scout" || len(bt.earlier) != 1 || bt.earlier[0].from != "carol" {
 			t.Errorf("%s: events = %+v, earlier = %+v", c.newTag, bt.events, bt.earlier)
 		}
 		p := bt.prompt()
-		want := c.earlierTitle + "\n\nkristian: find the latest release\n\n" + c.head + "\n\nFizz: and its price\n\n" + c.note
+		want := c.earlierTitle + "\n\ncarol: find the latest release\n\n" + c.head + "\n\nScout: and its price\n\n" + c.note
 		if !strings.Contains(p, want) || strings.Contains(p, "--- Event") || strings.Contains(p, "Tags:") {
 			t.Errorf("%s: prompt:\n%s\nwant it to contain:\n%s", c.newTag, p, want)
 		}
-		if a := bt.askers(); len(a) != 2 || a[0].pubkey != kristianHex || a[1].pubkey != fizzHex {
+		if a := bt.askers(); len(a) != 2 || a[0].pubkey != carolHex || a[1].pubkey != scoutHex {
 			t.Errorf("%s: askers = %+v", c.newTag, a)
 		}
 	}

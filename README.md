@@ -85,13 +85,48 @@ command line may need `BUZZ_ACP_RESPOND_TO=allowlist` with
   2026-10-08). If that changes, prompts pass through unrewritten and answers
   are not posted, and the bridge says so on stderr.
 
+## fleet-buzz-gateway
+
+`gateway/` is a second, separate command, for running the agent in a
+Kubernetes pod on the fleet server (Buzz Desktop's "Run on: kubernetes").
+fleet's chat API listens on loopback only and trusts two headers: its shared
+server token, which can act as any fleet user, and the user's email. The
+gateway lets the pod reach that API without holding the token. It:
+
+- listens on an address only the pods reach (the cluster bridge, e.g.
+  `10.42.0.1`), bound with `IP_FREEBIND` so it can start before the cluster
+  has created that address;
+- forwards to the chat API (`-upstream`, `http://127.0.0.1:8080` by default),
+  replacing the token header with the real token, read from `-token-file`,
+  and the user header with the one user it runs as (`-email`), and dropping
+  the other headers fleet trusts from a proxy;
+- forwards only what `fleet acp` calls (`POST /chat`, `GET /me`,
+  `POST /conversations/{id}/cancel`, `GET /client-config`, `GET /healthz`)
+  and refuses everything else with 403;
+- streams responses as they come (a turn is server-sent events).
+
+```sh
+go build -o fleet-buzz-gateway ./gateway
+fleet-buzz-gateway -listen 10.42.0.1:8081 -token-file /etc/fleet-buzz/fleet-token -email buzz-bot@example.com
+```
+
+The pod then runs `fleet acp --server http://10.42.0.1:8081` with a
+placeholder token, which the gateway replaces. Anything that can reach the
+gateway's address acts as that user without a token, so keep the cluster to
+this agent. fleet's `docs/ACP.md` ("Run it on Kubernetes from Buzz Desktop")
+has the whole setup: k3s, a systemd unit for the gateway, the agent image and
+Buzz Desktop's fields.
+
 ## Tests
 
 `go test ./...` runs the prompt parser against a real `buzz-acp` prompt
-(identities replaced) and the bridge end to end against a fake agent and a fake
-`buzz` CLI. Checked live on 2026-10-08 with `buzz-acp` (block/buzz `70d2ca7`), a
-hosted Buzz relay and `fleet acp` against a real `fleet serve`: an @mention got
-fleet's answer as a reply in its thread.
+(identities replaced), the bridge end to end against a fake agent and a fake
+`buzz` CLI, and the gateway against a fake chat API: the token and user are
+pinned, only `fleet acp`'s calls get through, and a turn streams. Checked live
+on 2026-10-08 with `buzz-acp` (block/buzz `70d2ca7`), a hosted Buzz relay and
+`fleet acp` against a real `fleet serve`: an @mention got fleet's answer as a
+reply in its thread. The gateway was checked live on 2026-10-09, with the agent
+in a k3s pod on a fleet server.
 
 ## License
 

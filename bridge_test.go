@@ -132,10 +132,10 @@ func startBridge(t *testing.T, mode string) *harness {
 	dir := t.TempDir()
 	// A stand-in for the Buzz CLI on the bridge's side: it records how it was
 	// called, what it was given to post, and whether it could see the key. A
-	// name lookup (users get) is recorded apart and finds kristian.
+	// name lookup (users get) is recorded apart and finds carol.
 	cli := filepath.Join(dir, "buzz")
 	script := "#!/bin/sh\nif [ \"$1\" = users ]; then\n  printf '%s\\n' \"$@\" > \"" + dir + "/buzz-users-args\"\n" +
-		"  echo '[{\"display_name\":\"kristian\",\"pubkey\":\"" + kristianHex + "\"}]'\n  exit 0\nfi\n" +
+		"  echo '[{\"display_name\":\"carol\",\"pubkey\":\"" + carolHex + "\"}]'\n  exit 0\nfi\n" +
 		"printf '%s\\n' \"$@\" > \"" + dir + "/buzz-args\"\ncat > \"" + dir + "/buzz-stdin\"\n" +
 		"[ -n \"$BUZZ_PRIVATE_KEY\" ] && echo 1 > \"" + dir + "/buzz-has-key\"\nexit 0\n"
 	if err := os.WriteFile(cli, []byte(script), 0o700); err != nil {
@@ -192,6 +192,7 @@ func (h *harness) until(id int) []map[string]any {
 }
 
 func (h *harness) promptBuzz(t *testing.T, text string) []map[string]any {
+	t.Helper()
 	h.send(1, "initialize", map[string]any{"protocolVersion": 1})
 	h.until(1)
 	h.send(2, "session/new", map[string]any{"cwd": "/tmp", "mcpServers": []any{}})
@@ -257,13 +258,13 @@ func TestPostsTheAnswerToTheBuzzThread(t *testing.T) {
 func TestABatchedTurnIsPostedToEveryAsker(t *testing.T) {
 	h := startBridge(t, "answer")
 	h.promptBuzz(t, "<context>\nScope: channel\nChannel: general (#"+fixtureChannel+")\n</context>\n\n<buzz-events count=\"2\">\n"+
-		listed(1, kristianMsg, "kristian", kristianHex, "@Fizz ask @fleet")+"\n\n"+listed(2, fizzMsg, "Fizz", fizzHex, "@fleet what's new?")+"\n</buzz-events>")
+		listed(1, carolMsg, "carol", carolHex, "@Scout ask @fleet")+"\n\n"+listed(2, scoutMsg, "Scout", scoutHex, "@fleet what's new?")+"\n</buzz-events>")
 	args, _ := h.file("buzz-args")
-	want := "messages\nsend\n--channel\n" + fixtureChannel + "\n--content\n-\n--reply-to\n" + fizzMsg + "\n--mention\n" + kristianHex + "\n--mention\n" + fizzHex + "\n"
+	want := "messages\nsend\n--channel\n" + fixtureChannel + "\n--content\n-\n--reply-to\n" + scoutMsg + "\n--mention\n" + carolHex + "\n--mention\n" + scoutHex + "\n"
 	if args != want {
 		t.Errorf("buzz called with\n%s\nwant\n%s", args, want)
 	}
-	if body, _ := h.file("buzz-stdin"); body != "@kristian @Fizz Hello world" {
+	if body, _ := h.file("buzz-stdin"); body != "@carol @Scout Hello world" {
 		t.Errorf("posted %q", body)
 	}
 }
@@ -273,13 +274,13 @@ func TestABatchedTurnIsPostedToEveryAsker(t *testing.T) {
 // name up.
 func TestAStoppedRequestsAskerIsMentionedByName(t *testing.T) {
 	h := startBridge(t, "answer")
-	h.promptBuzz(t, "<context>\nScope: thread\nChannel: general (#"+fixtureChannel+")\nIMPORTANT: reply with `--reply-to "+fizzMsg+"`\n</context>\n\n"+
-		"<what-you-were-working-on>\n"+listed(1, kristianMsg, "npub1kristian", kristianHex, "@Fizz ask @fleet")+"\n</what-you-were-working-on>\n\n"+
-		"<new-message-arrived-while-you-were-working>\n"+listed(1, fizzMsg, "Fizz", fizzHex, "@fleet what's new?")+"\n</new-message-arrived-while-you-were-working>")
-	if body, _ := h.file("buzz-stdin"); body != "@kristian @Fizz Hello world" {
+	h.promptBuzz(t, "<context>\nScope: thread\nChannel: general (#"+fixtureChannel+")\nIMPORTANT: reply with `--reply-to "+scoutMsg+"`\n</context>\n\n"+
+		"<what-you-were-working-on>\n"+listed(1, carolMsg, "npub1carol", carolHex, "@Scout ask @fleet")+"\n</what-you-were-working-on>\n\n"+
+		"<new-message-arrived-while-you-were-working>\n"+listed(1, scoutMsg, "Scout", scoutHex, "@fleet what's new?")+"\n</new-message-arrived-while-you-were-working>")
+	if body, _ := h.file("buzz-stdin"); body != "@carol @Scout Hello world" {
 		t.Errorf("posted %q", body)
 	}
-	if args, _ := h.file("buzz-users-args"); args != "users\nget\n--pubkey\n"+kristianHex+"\n" {
+	if args, _ := h.file("buzz-users-args"); args != "users\nget\n--pubkey\n"+carolHex+"\n" {
 		t.Errorf("names looked up with\n%s", args)
 	}
 }
@@ -428,12 +429,12 @@ func TestRepliesMentionEachAsker(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	b := newTestBridge(&now)
 	alice := buzzEvent{from: "alice", pubkey: strings.Repeat("a", 64), content: "x"}
-	fizz := buzzEvent{from: "Fizz", pubkey: strings.Repeat("f", 64), content: "y"}
-	text, keys := b.address(context.Background(), addressTurn(alice, fizz, alice), "the answer")
-	if text != "@alice @Fizz the answer" {
+	scout := buzzEvent{from: "Scout", pubkey: strings.Repeat("f", 64), content: "y"}
+	text, keys := b.address(context.Background(), addressTurn(alice, scout, alice), "the answer")
+	if text != "@alice @Scout the answer" {
 		t.Errorf("text = %q", text)
 	}
-	if strings.Join(keys, ",") != alice.pubkey+","+fizz.pubkey {
+	if strings.Join(keys, ",") != alice.pubkey+","+scout.pubkey {
 		t.Errorf("mentions = %v", keys)
 	}
 	// A sender whose key the prompt did not carry is not mentioned.
@@ -448,23 +449,23 @@ func TestRepliesMentionEachAsker(t *testing.T) {
 func TestMentionsAreCappedPerAskerAndThread(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	b := newTestBridge(&now)
-	fizz := buzzEvent{from: "Fizz", pubkey: strings.Repeat("f", 64), content: "y"}
+	scout := buzzEvent{from: "Scout", pubkey: strings.Repeat("f", 64), content: "y"}
 	for i := 0; i < maxMentions; i++ {
-		if _, keys := b.address(context.Background(), addressTurn(fizz), "r"); len(keys) != 1 {
+		if _, keys := b.address(context.Background(), addressTurn(scout), "r"); len(keys) != 1 {
 			t.Fatalf("reply %d did not mention the asker", i+1)
 		}
 		now = now.Add(time.Minute)
 	}
-	if text, keys := b.address(context.Background(), addressTurn(fizz), "r"); text != "r" || keys != nil {
+	if text, keys := b.address(context.Background(), addressTurn(scout), "r"); text != "r" || keys != nil {
 		t.Errorf("reply %d mentioned again: %q %v", maxMentions+1, text, keys)
 	}
-	other := addressTurn(fizz)
+	other := addressTurn(scout)
 	other.replyTo = strings.Repeat("e", 64)
 	if _, keys := b.address(context.Background(), other, "r"); len(keys) != 1 {
 		t.Error("the cap leaked into another thread")
 	}
 	now = now.Add(mentionWindow)
-	if _, keys := b.address(context.Background(), addressTurn(fizz), "r"); len(keys) != 1 {
+	if _, keys := b.address(context.Background(), addressTurn(scout), "r"); len(keys) != 1 {
 		t.Error("still capped after the window passed")
 	}
 }
@@ -477,22 +478,22 @@ func TestNamesAreLookedUpOnlyWhenMissing(t *testing.T) {
 	var calls [][]string
 	b.names = func(_ context.Context, keys []string) (map[string]string, error) {
 		calls = append(calls, keys)
-		if keys[0] == kristianHex {
-			return map[string]string{kristianHex: "kristian"}, nil
+		if keys[0] == carolHex {
+			return map[string]string{carolHex: "carol"}, nil
 		}
 		return nil, errors.New("relay unreachable")
 	}
-	kristian := buzzEvent{from: "npub1kristian", pubkey: kristianHex, content: "x"}
-	fizz := buzzEvent{from: "Fizz", named: true, pubkey: fizzHex, content: "y"}
-	turn := addressTurn(fizz)
-	turn.earlier = []buzzEvent{kristian}
+	carol := buzzEvent{from: "npub1carol", pubkey: carolHex, content: "x"}
+	scout := buzzEvent{from: "Scout", named: true, pubkey: scoutHex, content: "y"}
+	turn := addressTurn(scout)
+	turn.earlier = []buzzEvent{carol}
 	for i := 0; i < 2; i++ {
-		if text, _ := b.address(context.Background(), turn, "the answer"); text != "@kristian @Fizz the answer" {
+		if text, _ := b.address(context.Background(), turn, "the answer"); text != "@carol @Scout the answer" {
 			t.Errorf("reply %d: text = %q", i+1, text)
 		}
 	}
-	if len(calls) != 1 || len(calls[0]) != 1 || calls[0][0] != kristianHex {
-		t.Errorf("lookups = %v, want one, for kristian only", calls)
+	if len(calls) != 1 || len(calls[0]) != 1 || calls[0][0] != carolHex {
+		t.Errorf("lookups = %v, want one, for carol only", calls)
 	}
 	other := buzzEvent{from: "npub1other", pubkey: strings.Repeat("c", 64), content: "z"}
 	if text, keys := b.address(context.Background(), addressTurn(other), "a"); text != "@npub1other a" || len(keys) != 1 {

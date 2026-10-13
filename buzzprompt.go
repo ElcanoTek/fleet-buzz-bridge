@@ -195,7 +195,7 @@ func (t buzzTurn) askers() []buzzEvent {
 }
 
 // displayName is the From field's name, without the keys buzz-acp appends:
-// "kristian (npub: …, hex: …)" is "kristian", and a sender with no profile
+// "carol (npub: …, hex: …)" is "carol", and a sender with no profile
 // name, "npub1… (hex: …)", is its npub.
 func displayName(from string) string {
 	for _, sep := range []string{" (npub: ", " (hex: "} {
