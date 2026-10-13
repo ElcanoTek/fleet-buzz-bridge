@@ -92,3 +92,10 @@ command line may need `BUZZ_ACP_RESPOND_TO=allowlist` with
 `buzz` CLI. Checked live on 2026-10-08 with `buzz-acp` (block/buzz `70d2ca7`), a
 hosted Buzz relay and `fleet acp` against a real `fleet serve`: an @mention got
 fleet's answer as a reply in its thread.
+
+## License
+
+MIT, see [LICENSE](LICENSE). This covers the bridge and `gateway/`.
+`testdata/first-prompt.txt` quotes excerpts of `buzz-acp`'s prompt from
+[block/buzz](https://github.com/block/buzz), which is licensed under the
+[Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0).
