@@ -73,11 +73,11 @@ export BUZZ_PRIVATE_KEY=…            # the agent's own identity, a workspace m
 export BUZZ_RELAY_URL=wss://…
 export BUZZ_ACP_AGENT_COMMAND=fleet-buzz-bridge
 export BUZZ_ACP_AGENT_ARGS=fleet,acp  # the agent the bridge starts, and its args
-export FLEET_USER_EMAIL=buzz-bot@example.com
+export FLEET_API_KEY=…               # a user API key (fleet sched apikey create ... --type user --user buzz-bot@example.com)
 buzz-acp
 ```
 
-`fleet acp` resolves its server and token as usual (see fleet's
+`fleet acp` resolves its server and user API key as usual (see fleet's
 [`docs/ACP.md`](https://github.com/ElcanoTek/fleet/blob/main/docs/ACP.md),
 "Buzz", for the whole setup). The bridge posts with `buzz` on `PATH`, or
 `$FLEET_BUZZ_CLI`. `buzz-acp` answers only the agent's owner by default; an
@@ -102,17 +102,17 @@ agent run from the command line may need `BUZZ_ACP_RESPOND_TO=allowlist` with
 
 `gateway/` is a second, separate command, for running the agent in a
 Kubernetes pod on the fleet server (Buzz Desktop's "Run on: kubernetes").
-fleet's chat API listens on loopback only and trusts two headers: its shared
-server token, which can act as any fleet user, and the user's email. The
-gateway lets the pod reach that API without holding the token. It:
+fleet's chat API listens on loopback only and authenticates callers with a
+per-user API key (`X-API-Key`, ADR-0108), which names one fleet user. The
+gateway lets the pod reach that API without holding the real key. It:
 
 - listens on an address only the pods reach (the cluster bridge, e.g.
   `10.42.0.1`), bound with `IP_FREEBIND` so it can start before the cluster
   has created that address;
 - forwards to the chat API (`-upstream`, `http://127.0.0.1:8080` by default),
-  replacing the token header with the real token, read from `-token-file`,
-  and the user header with the one user it runs as (`-email`), and dropping
-  the other headers fleet trusts from a proxy;
+  replacing `X-API-Key` with the real user API key, read from `-key-file`
+  (or `-token-file` for existing systemd unit files), and stripping
+  `Authorization` and any retired/proxy identity headers;
 - forwards only what `fleet acp` calls (`POST /chat`, `GET /me`,
   `POST /conversations/{id}/cancel`, `GET /client-config`, `GET /healthz`)
   and refuses everything else with 403;
@@ -122,13 +122,13 @@ It builds on Linux only (it uses `IP_FREEBIND`).
 
 ```sh
 go build -o fleet-buzz-gateway ./gateway
-fleet-buzz-gateway -listen 10.42.0.1:8081 -token-file /etc/fleet-buzz/fleet-token -email buzz-bot@example.com
+fleet-buzz-gateway -listen 10.42.0.1:8081 -key-file /etc/fleet-buzz/fleet-token
 ```
 
-The pod then runs `fleet acp --server http://10.42.0.1:8081` with a placeholder
-token, which the gateway replaces. Anything that can reach the gateway's
-address acts as that user without a token, so keep the cluster to this agent.
-The "Run it on Kubernetes from Buzz Desktop" section of fleet's
+The pod then runs `fleet acp --server http://10.42.0.1:8081 --key-file /etc/fleet-buzz/via-gateway-token`
+with a placeholder key, which the gateway replaces. Anything that can reach the
+gateway's address acts as that user without a key, so keep the cluster to this
+agent. The "Run it on Kubernetes from Buzz Desktop" section of fleet's
 [`docs/ACP.md`](https://github.com/ElcanoTek/fleet/blob/main/docs/ACP.md) has
 the whole setup: k3s, a systemd unit for the gateway, the agent image and Buzz
 Desktop's fields.

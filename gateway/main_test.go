@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-const realToken = "test-only-real-token"
+const realAPIKey = "test-only-real-user-api-key"
 
 // fakeChat records what reached fleet's chat API.
 type fakeChat struct {
@@ -39,17 +39,19 @@ func start(t *testing.T) (*fakeChat, *httptest.Server) {
 	upstream := httptest.NewServer(chat)
 	t.Cleanup(upstream.Close)
 	up, _ := url.Parse(upstream.URL)
-	gw := httptest.NewServer(newGateway(up, realToken, "buzz-bot@example.com", log.New(io.Discard, "", 0)))
+	gw := httptest.NewServer(newGateway(up, realAPIKey, log.New(io.Discard, "", 0)))
 	t.Cleanup(gw.Close)
 	return chat, gw
 }
 
-// Whatever the pod sends, fleet sees the real token and the one pinned user;
-// no other trust header gets through.
-func TestTheTokenAndUserArePinned(t *testing.T) {
+// Whatever the pod sends, fleet sees only the real user API key; no pod
+// credential, proxy header, or retired identity header gets through.
+func TestTheAPIKeyIsPinnedAndTrustHeadersStripped(t *testing.T) {
 	chat, gw := start(t)
 	req, _ := http.NewRequest(http.MethodGet, gw.URL+"/me", nil)
-	req.Header.Set("X-Chat-Server-Token", "whatever-the-pod-has")
+	req.Header.Set("X-API-Key", "whatever-the-pod-has")
+	req.Header.Set("Authorization", "Bearer pod-bearer")
+	req.Header.Set("X-Chat-Server-Token", "retired-token")
 	req.Header.Set("X-User-Email", "admin@example.com")
 	req.Header.Set("X-User-Session-Epoch", "1")
 	req.Header.Set("X-Fleet-Client", "fleet-acp")
@@ -62,11 +64,13 @@ func TestTheTokenAndUserArePinned(t *testing.T) {
 		t.Fatalf("%d requests reached fleet", len(chat.got))
 	}
 	h := chat.got[0].Header
-	if h.Get("X-Chat-Server-Token") != realToken || h.Get("X-User-Email") != "buzz-bot@example.com" {
-		t.Errorf("fleet got token %q as %q", h.Get("X-Chat-Server-Token"), h.Get("X-User-Email"))
+	if h.Get("X-API-Key") != realAPIKey {
+		t.Errorf("fleet got X-API-Key %q, want %q", h.Get("X-API-Key"), realAPIKey)
 	}
-	if h.Get("X-User-Session-Epoch") != "" {
-		t.Error("a trust header from the pod reached fleet")
+	for _, stripped := range []string{"Authorization", "X-Chat-Server-Token", "X-User-Email", "X-User-Session-Epoch"} {
+		if got := h.Get(stripped); got != "" {
+			t.Errorf("header %s=%q from the pod reached fleet", stripped, got)
+		}
 	}
 	if h.Get("X-Fleet-Client") != "fleet-acp" {
 		t.Error("an ordinary header was dropped")

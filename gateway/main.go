@@ -1,17 +1,16 @@
 // Command fleet-buzz-gateway lets a fleet agent running outside the fleet
 // host's loopback (a Buzz agent pod in a cluster on the same machine) reach
-// fleet's chat API without holding fleet's shared server token.
+// fleet's chat API without holding fleet's API key.
 //
-// fleet's chat API listens on loopback only and trusts two headers: the
-// shared token (X-Chat-Server-Token), which can act as any fleet user, and
-// the user (X-User-Email). The gateway listens on an address only the pods
-// reach (the cluster bridge, e.g. 10.42.0.1), forwards to the chat API, and
-// on every request:
+// fleet's chat API authenticates callers with a per-user API key (X-API-Key,
+// ADR-0108), which names one fleet user. The gateway listens on an address
+// only the pods reach (the cluster bridge, e.g. 10.42.0.1), forwards to the
+// chat API, and on every request:
 //
-//   - replaces X-Chat-Server-Token with the real token, read from a file it
-//     alone can read, so the pod needs no fleet secret;
-//   - replaces X-User-Email with the one user it was started for, so whatever
-//     runs in the pod can act only as that user;
+//   - replaces X-API-Key with the real user API key, read from a file it
+//     alone can read, and strips Authorization and any retired/proxy identity
+//     headers, so the pod needs no fleet secret and can act only as the user
+//     the key was minted for;
 //   - lets through only what `fleet acp` uses (POST /chat, GET /me,
 //     POST /conversations/{id}/cancel, GET /client-config, GET /healthz) and
 //     refuses everything else;
@@ -46,24 +45,29 @@ func run(args []string, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	listen := fs.String("listen", "", "address to listen on, e.g. 10.42.0.1:8081 (bound even before the address exists)")
 	upstream := fs.String("upstream", "http://127.0.0.1:8080", "fleet's chat API")
-	tokenFile := fs.String("token-file", "", "file holding fleet's shared server token")
-	email := fs.String("email", "", "the fleet user every request runs as")
+	keyFile := fs.String("key-file", "", "file holding the fleet user API key (fleet sched apikey create ... --type user --user <email>)")
+	tokenFile := fs.String("token-file", "", "alias for -key-file (kept for existing systemd unit files)")
+	email := fs.String("email", "", "unused (kept for existing systemd unit files; the user API key names the account)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	logger := log.New(stderr, "fleet-buzz-gateway: ", 0)
-	if *listen == "" || *tokenFile == "" || *email == "" {
-		logger.Print("-listen, -token-file and -email are required")
+	path := *keyFile
+	if path == "" {
+		path = *tokenFile
+	}
+	if *listen == "" || path == "" {
+		logger.Print("-listen and -key-file (or -token-file) are required")
 		return 2
 	}
-	b, err := os.ReadFile(*tokenFile)
+	b, err := os.ReadFile(path)
 	if err != nil {
 		logger.Print(err)
 		return 1
 	}
-	token := strings.TrimSpace(string(b))
-	if token == "" {
-		logger.Printf("%s is empty", *tokenFile)
+	key := strings.TrimSpace(string(b))
+	if key == "" {
+		logger.Printf("%s is empty", path)
 		return 1
 	}
 	up, err := url.Parse(*upstream)
@@ -77,7 +81,7 @@ func run(args []string, stderr io.Writer) int {
 		return 1
 	}
 	srv := &http.Server{
-		Handler:           newGateway(up, token, *email, logger),
+		Handler:           newGateway(up, key, logger),
 		ReadHeaderTimeout: 30 * time.Second,
 	}
 	go func() {
@@ -86,7 +90,11 @@ func run(args []string, stderr io.Writer) int {
 		<-sigs
 		_ = srv.Close()
 	}()
-	logger.Printf("listening on %s, forwarding to %s as %s", *listen, up, *email)
+	if *email != "" {
+		logger.Printf("listening on %s, forwarding to %s (for %s)", *listen, up, *email)
+	} else {
+		logger.Printf("listening on %s, forwarding to %s", *listen, up)
+	}
 	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		logger.Print(err)
 		return 1
@@ -125,22 +133,22 @@ func allowed(r *http.Request) bool {
 	return true
 }
 
-// Headers fleet's servers trust from a proxy in front of them; the gateway is
-// one, so none may pass through from the pod.
-var trustHeaders = []string{
+// Credential, proxy, and retired identity headers that must never pass through
+// from the pod; the gateway pins the request's credential to its own X-API-Key.
+var stripHeaders = []string{
+	"X-API-Key", "Authorization",
 	"X-Chat-Server-Token", "X-User-Email", "X-User-Session-Epoch",
 	"X-Orchestrator-Server-Token", "X-Forwarded-For", "X-Real-Ip",
 }
 
-func newGateway(up *url.URL, token, email string, logger *log.Logger) http.Handler {
+func newGateway(up *url.URL, apiKey string, logger *log.Logger) http.Handler {
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(up)
-			for _, h := range trustHeaders {
+			for _, h := range stripHeaders {
 				pr.Out.Header.Del(h)
 			}
-			pr.Out.Header.Set("X-Chat-Server-Token", token)
-			pr.Out.Header.Set("X-User-Email", email)
+			pr.Out.Header.Set("X-API-Key", apiKey)
 		},
 		FlushInterval: -1, // a turn is server-sent events
 		ErrorLog:      logger,
